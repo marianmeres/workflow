@@ -1,0 +1,4 @@
+PostgreSQL-backed durable workflow/orchestration framework for Deno and Node.js. Long-lived
+persisted FSM instances with version-pinned definitions, durable timer wake-ups, and external-
+signal correlation via an inbox + matchers. Effects run as transactional outbox jobs; built on
+@marianmeres/fsm, @marianmeres/steve, @marianmeres/cron, and @marianmeres/migrate.
