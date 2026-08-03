@@ -13,6 +13,7 @@
     "jsr:@marianmeres/npmbuild@^1.16.0": "1.16.0",
     "jsr:@marianmeres/parse-boolean@^2.1.0": "2.1.0",
     "jsr:@marianmeres/pubsub@3": "3.0.0",
+    "jsr:@marianmeres/release@*": "2.0.0",
     "jsr:@marianmeres/searchable@^2.6.4": "2.6.5",
     "jsr:@marianmeres/steve@^2.0.2": "2.0.2",
     "jsr:@std/assert@^1.0.19": "1.0.19",
@@ -91,6 +92,9 @@
     },
     "@marianmeres/pubsub@3.0.0": {
       "integrity": "9bc40e60362801663fb23e0c00a353abec7684840b6bea410facba09c083677b"
+    },
+    "@marianmeres/release@2.0.0": {
+      "integrity": "a0358067f8500edaa795f22f6f962765a7f20edd6d8869c0793f11ee02fb47c0"
     },
     "@marianmeres/searchable@2.6.5": {
       "integrity": "cd4f967e183ce2b9dcdafb5dee344571c752c3f24ea931b7416fde9d2ef345b8"
