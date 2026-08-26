@@ -254,6 +254,12 @@ Deno.test({
 			assertEquals(survived.cursor, "cooldown");
 
 			// The cooldown expires; now the instance is at the real wait point.
+			// The timer has to be genuinely due: the scheduler tick only pokes, so
+			// the advance is what re-checks `wake_at` before applying TIMEOUT.
+			await pool.query(
+				`UPDATE __workflow_instances SET wake_at = now() - interval '1 second' WHERE id = $1`,
+				[inst.id],
+			);
 			await inst.run({
 				kind: "timeout",
 				expected_seq: survived.seq,

@@ -133,37 +133,61 @@ export async function updateInstance(
 	return r.rows[0];
 }
 
+/** The minimum a scheduler poke needs: who to poke, and the fence to poke with. */
+export interface InstancePoke {
+	id: string;
+	seq: number;
+}
+
 /**
- * Atomically transitions waiting+due rows to `pending` and clears their
- * `wake_at`. Returns the ids of rows that flipped — caller dispatches advance
- * jobs for each.
- *
- * Atomic on the row so two concurrent scheduler ticks can't double-dispatch.
+ * Instances whose timer has expired. Read-only on purpose: the scheduler only
+ * pokes an advance per row, and the advance — which re-checks the due-ness under
+ * the row lock — is what writes the state and clears `wake_at`. A row poked but
+ * not yet advanced stays due and is poked again next tick; the fence turns the
+ * duplicate into a no-op. Nothing is left stranded by a crash mid-tick.
  */
-export async function claimDueWakeUps(
+export async function selectDueWakeUps(
 	exec: Executor,
 	tenant_id: string,
 	limit: number = 100,
-): Promise<Array<{ id: string; correlation_token: string | null; seq: number }>> {
-	const r = await exec.query<
-		{ id: string; correlation_token: string | null; seq: number }
-	>(
-		`UPDATE __workflow_instances
-		    SET execution_state = $2,
-		        wake_at = NULL,
-		        updated_at = now()
-		  WHERE id IN (
-		      SELECT id FROM __workflow_instances
-		       WHERE tenant_id = $1
-		         AND execution_state = $3
-		         AND wake_at IS NOT NULL
-		         AND wake_at <= now()
-		       ORDER BY wake_at
-		       LIMIT $4
-		       FOR UPDATE SKIP LOCKED
-		  )
-		  RETURNING id, correlation_token, seq`,
-		[tenant_id, EXECUTION_STATE.PENDING, EXECUTION_STATE.WAITING, limit],
+): Promise<InstancePoke[]> {
+	const r = await exec.query<InstancePoke>(
+		`SELECT id, seq FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND execution_state = $2
+		    AND wake_at IS NOT NULL
+		    AND wake_at <= now()
+		  ORDER BY wake_at
+		  LIMIT $3`,
+		[tenant_id, EXECUTION_STATE.WAITING, limit],
+	);
+	return r.rows;
+}
+
+/**
+ * Instances stuck in `pending` for longer than `older_than_sec` — the residue of
+ * a crash between `create()`'s commit and steve's (separate-connection) job
+ * insert, i.e. rows no job will ever pick up.
+ *
+ * Only meaningful because `create()` is the sole producer of `pending`: every
+ * other write path settles the row into a state this scan ignores. A row that is
+ * merely waiting on a slow queue is re-poked too, harmlessly — the second
+ * advance to reach it is fenced out.
+ */
+export async function selectStalePending(
+	exec: Executor,
+	tenant_id: string,
+	older_than_sec: number,
+	limit: number = 100,
+): Promise<InstancePoke[]> {
+	const r = await exec.query<InstancePoke>(
+		`SELECT id, seq FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND execution_state = $2
+		    AND updated_at < now() - make_interval(secs => $3::float8)
+		  ORDER BY updated_at
+		  LIMIT $4`,
+		[tenant_id, EXECUTION_STATE.PENDING, older_than_sec, limit],
 	);
 	return r.rows;
 }

@@ -165,15 +165,20 @@ export async function runAdvance(
 
 		// Per-kind preconditions. Applied only to payloads that state their kind:
 		// on a legacy payload the kind is a guess, and guessing wrong must not
-		// swallow the job. `timeout` gets its own once the scheduler tick stops
-		// pre-flipping the row to `pending` (01-durability #2).
+		// swallow the job. `timeout` re-checks due-ness because the scheduler tick
+		// is read-only: the timer is still live until this advance clears it, and
+		// an advance that applied TIMEOUT to a not-yet-due row would cut the wait
+		// short.
 		if (
 			(payload.kind === "start" &&
 				row.execution_state !== EXECUTION_STATE.PENDING) ||
 			(payload.kind === "effect" &&
 				row.execution_state !== EXECUTION_STATE.RUNNING) ||
 			(payload.kind === "signal" &&
-				row.execution_state !== EXECUTION_STATE.WAITING)
+				row.execution_state !== EXECUTION_STATE.WAITING) ||
+			(payload.kind === "timeout" &&
+				(row.execution_state !== EXECUTION_STATE.WAITING || !row.wake_at ||
+					row.wake_at > new Date()))
 		) {
 			clog.debug?.(
 				`advance: ${payload.kind} precondition not met (${row.execution_state}); no-op`,

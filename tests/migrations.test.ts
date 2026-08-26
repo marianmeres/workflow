@@ -17,7 +17,17 @@ const columns = async (pool: pg.Pool, table: string): Promise<string[]> => {
 	return rows.map((r) => r.column_name);
 };
 
+const indexes = async (pool: pg.Pool, table: string): Promise<string[]> => {
+	const { rows } = await pool.query<{ indexname: string }>(
+		`SELECT indexname FROM pg_indexes WHERE tablename = $1`,
+		[table],
+	);
+	return rows.map((r) => r.indexname);
+};
+
 const TABLES = ["__workflow_instances", "__workflow_inbox", "__workflow_history"];
+
+const STALE_PENDING_IDX = "__workflow_instances_stale_pending_idx";
 
 async function waitUntil<T>(
 	predicate: () => Promise<T | null | undefined | false>,
@@ -146,7 +156,8 @@ Deno.test({
 });
 
 Deno.test({
-	name: "migration 1.2.0: adds the seq fence, reversible via down('1.1.0')",
+	name:
+		"migration 1.2.0: adds the seq fence + stale-pending index, reversible via down('1.1.0')",
 	ignore: !pgConfigured(),
 	async fn() {
 		const pool = createPg();
@@ -155,9 +166,15 @@ Deno.test({
 
 			await createMigrate(pool).up("1.1.0");
 			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				!(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+			);
 
 			await createMigrate(pool).up("latest");
 			assert((await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+			);
 
 			// Pre-existing rows migrate in at the fence's zero point.
 			const { rows } = await pool.query<{ seq: number }>(
@@ -170,6 +187,9 @@ Deno.test({
 
 			await createMigrate(pool).down("1.1.0");
 			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				!(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+			);
 			assert((await columns(pool, "__workflow_instances")).includes("tenant_id"));
 		} finally {
 			await pool.end();

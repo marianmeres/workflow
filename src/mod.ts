@@ -37,6 +37,7 @@
  */
 export { Workflow, type WorkflowOptions } from "./workflow.ts";
 export {
+	type SchedulerTickResult,
 	WorkflowScheduler,
 	type WorkflowSchedulerOptions,
 } from "./scheduler.ts";

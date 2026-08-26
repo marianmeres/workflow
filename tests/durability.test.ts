@@ -1,3 +1,4 @@
+import { Cron } from "@marianmeres/cron";
 import { Jobs } from "@marianmeres/steve";
 import { assert, assertEquals } from "@std/assert";
 import type pg from "pg";
@@ -5,8 +6,10 @@ import {
 	createMigrate,
 	EXECUTION_STATE,
 	getHistory,
+	JOB_TYPE_ADVANCE,
 	Workflow,
 	WorkflowRegistry,
+	WorkflowScheduler,
 	type AdvanceJobPayload,
 	type EffectJobPayload,
 	type WorkflowInstanceRow,
@@ -238,6 +241,145 @@ Deno.test({
 				EXECUTION_STATE.FAILED,
 			);
 		} finally {
+			await pool.end();
+		}
+	},
+});
+
+/** A Workflow wired to a real (but not yet started) Jobs, plus its scheduler. */
+function setupScheduler(
+	pool: pg.Pool,
+	tenantId: string,
+	stalePendingSec?: number,
+) {
+	const jobs = new Jobs({ db: pool, pollTimeoutMs: 50 });
+	const { handlers, matchers } = makeHandlers();
+	const workflow = new Workflow({
+		db: pool,
+		jobs,
+		tenantId,
+		definitions: [stockReplenishmentV1],
+		handlers,
+		matchers,
+	});
+	const cron = new Cron({ db: pool, pollTimeoutMs: 50 });
+	const scheduler = new WorkflowScheduler({ cron, workflow, stalePendingSec });
+	return { cron, jobs, workflow, scheduler };
+}
+
+Deno.test({
+	name: "poke: two scheduler ticks over one due row apply TIMEOUT once",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		const { jobs, workflow, scheduler } = setupScheduler(pool, "poke-timeout");
+
+		try {
+			// Drive the instance to `await_reply` with the worker still stopped, so
+			// both ticks below see the very same, un-advanced row.
+			const inst = await seedInstance(pool, "poke-timeout");
+			const { effects, enqueuer } = recordingEnqueuer();
+			const reg = registry();
+			const base = { tenant_id: "poke-timeout", instance_id: inst.id };
+			await runAdvance(pool, reg, enqueuer, {
+				...base,
+				kind: "start",
+				expected_seq: inst.seq,
+			});
+			await runAdvance(pool, reg, enqueuer, {
+				...base,
+				kind: "effect",
+				expected_seq: effects[0].seq,
+				outcome: "LOW",
+				handler: "checkInventory",
+			});
+			await runAdvance(pool, reg, enqueuer, {
+				...base,
+				kind: "effect",
+				expected_seq: effects[1].seq,
+				outcome: "SENT",
+				handler: "sendOrderEmail",
+			});
+			const waiting = await reread(pool, inst.id);
+			assertEquals(waiting.execution_state, EXECUTION_STATE.WAITING);
+			assertEquals(waiting.cursor, "await_reply");
+
+			await pool.query(
+				`UPDATE __workflow_instances SET wake_at = now() - interval '1 minute' WHERE id = $1`,
+				[inst.id],
+			);
+
+			// The tick no longer claims the row, so it is still due on the second
+			// pass and gets poked again — with the same, now duplicated, fence.
+			assertEquals(await scheduler.tickOnce(), { woken: 1, repoked: 0 });
+			assertEquals(await scheduler.tickOnce(), { woken: 1, repoked: 0 });
+			const { rows: queued } = await pool.query<{ n: string }>(
+				`SELECT count(*) AS n FROM __job WHERE type = $1`,
+				[JOB_TYPE_ADVANCE],
+			);
+			assertEquals(queued[0].n, "2");
+
+			await jobs.start(2);
+			const done = await waitUntil(async () => {
+				const row = await workflow.find(inst.id);
+				return row?.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+			});
+			assertEquals(done.cursor, "_end_timeout");
+
+			const events = (await getHistory(pool, inst.id)).map((h) => h.event_type);
+			assertEquals(events.filter((e) => e === "timeout").length, 1);
+			assert(
+				!events.includes("transition_rejected"),
+				`unexpected rejection: ${events.join(", ")}`,
+			);
+		} finally {
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name: "re-poke: a stale pending row with no job is advanced by the next tick",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		const { cron, jobs, workflow, scheduler } = setupScheduler(pool, "repoke", 60);
+		const disabled = new WorkflowScheduler({
+			cron,
+			workflow,
+			stalePendingSec: 0,
+		});
+
+		try {
+			// What a crash between create()'s commit and steve's job insert leaves
+			// behind: a pending row nothing will ever pick up.
+			const inst = await seedInstance(pool, "repoke");
+
+			// Too fresh to be stranded — it may still be someone's in-flight job.
+			assertEquals(await scheduler.tickOnce(), { woken: 0, repoked: 0 });
+
+			await pool.query(
+				`UPDATE __workflow_instances SET updated_at = now() - interval '10 minutes' WHERE id = $1`,
+				[inst.id],
+			);
+			assertEquals(await disabled.tickOnce(), { woken: 0, repoked: 0 });
+			assertEquals(await scheduler.tickOnce(), { woken: 0, repoked: 1 });
+
+			await jobs.start(2);
+			const row = await waitUntil(async () => {
+				const r = await workflow.find(inst.id);
+				return r?.execution_state === EXECUTION_STATE.WAITING ? r : null;
+			});
+			assertEquals(row.cursor, "await_reply");
+		} finally {
+			await jobs.stop();
 			await pool.end();
 		}
 	},

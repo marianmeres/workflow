@@ -164,14 +164,13 @@ Deno.test({
 				return row && row.execution_state === EXECUTION_STATE.WAITING ? row : null;
 			});
 
-			// Force wake_at into the past so the scheduler's next tick claims it.
+			// Force wake_at into the past so the scheduler's next tick pokes it.
 			await pool.query(
 				`UPDATE __workflow_instances SET wake_at = now() - interval '1 minute' WHERE id = $1`,
 				[inst.id],
 			);
 
-			const claimed = await scheduler.tickOnce();
-			assertEquals(claimed, 1);
+			assertEquals(await scheduler.tickOnce(), { woken: 1, repoked: 0 });
 
 			const finalRow = await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
