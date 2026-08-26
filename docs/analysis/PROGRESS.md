@@ -25,7 +25,7 @@ Verify: deno check src/mod.ts tests/*.ts
 | ✅     | T02 | T01             | Correlator: defer early signals, deliver only to `MATCHED`-accepting waits, processed-in-advance, per-tick dedupe, matcher-throw retry    | [02](./02-correlation.md) #1, #2 | —      |
 | ✅     | T03 | T01 T02         | Scheduler: read-only TIMEOUT pokes + stale-pending re-poke; delete `claimDueWakeUps`; pending partial index                               | [01](./01-durability.md) #2      | —      |
 | ✅     | T04 | T01             | Observe `workflow.advance` failures; bounded re-dispatch of `expired` advance/effect jobs; `advanceMaxAttempts`, `redispatchLimit`        | [01](./01-durability.md) #3      | —      |
-| ⬜     | T05 | T01 T02 T03 T04 | Docs pass: correct durability claims, document `autoCleanup`, fence/poke model, signal semantics, noop-handler hazards                    | [04](./04-docs-tests-ops.md) #1  | —      |
+| ✅     | T05 | T01 T02 T03 T04 | Docs pass: correct durability claims, document `autoCleanup`, fence/poke model, signal semantics, noop-handler hazards                    | [04](./04-docs-tests-ops.md) #1  | —      |
 
 `Verify:` deliberately omits `deno lint` / `deno fmt --check` — both are red at the
 baseline (T15). Add them once T15 lands.

@@ -98,7 +98,7 @@ Looks up an instance by id, scoped to this Workflow's `tenantId`. Returns `null`
 
 ##### `appendInbox(input): Promise<InboxRow>`
 
-Appends an external signal to `__workflow_inbox`. The correlator's next tick matches it to a waiting instance, runs the matcher, and (on match) enqueues an advance with `outcome: 'MATCHED'` and `outcome_data: payload`.
+Appends an external signal to `__workflow_inbox`. The correlator's next tick matches it to a waiting instance, runs the matcher, and (on match) pokes an advance which delivers `MATCHED` with the row's payload and marks the row processed in one transaction. A signal that arrives before its wait point is deferred, not dropped — see [Per-tick behavior](#per-tick-behavior-1).
 
 | Field | Type | Description |
 |---|---|---|
@@ -114,7 +114,7 @@ Internal `JobEnqueuer` interface methods used by the driver. Public so the sched
 
 ### `WorkflowScheduler`
 
-Cron-driven scheduler that wakes time-suspended instances. Attaches its tick to an **externally-owned** `@marianmeres/cron` `Cron` instance when `register()` is called. Each tick claims due rows and enqueues advance jobs with `outcome: 'TIMEOUT'`.
+Cron-driven scheduler that wakes time-suspended instances. Attaches its tick to an **externally-owned** `@marianmeres/cron` `Cron` instance when `register()` is called. Each tick is read-only: it selects due rows and pokes one fenced `TIMEOUT` advance per row, which does the actual write.
 
 ```typescript
 import { WorkflowScheduler } from "@marianmeres/workflow";
@@ -135,8 +135,9 @@ new WorkflowScheduler(options: WorkflowSchedulerOptions)
 | `workflow` | `Workflow` | required | The Workflow whose instances this scheduler wakes. `tenantId` and `db` are derived from it. |
 | `tickExpression` | `string` | `"* * * * *"` | 5-field cron expression. |
 | `timezone` | `string \| null` | host local | IANA timezone for the cron expression. |
-| `tickBatchSize` | `number` | `100` | Max rows claimed per tick. |
+| `tickBatchSize` | `number` | `100` | Max rows poked per tick, **per scan**. |
 | `tickName` | `string` | `workflow.scheduler.<tenantId>` | Cron job name. |
+| `stalePendingSec` | `number` | `300` | Age at which a `pending` instance is assumed stranded and re-poked with a fresh `start` advance. Covers the crash window between `create()`'s commit and steve's job insert (separate connection). `0` disables the scan. |
 
 #### Methods
 
@@ -146,7 +147,23 @@ new WorkflowScheduler(options: WorkflowSchedulerOptions)
 |---|---|
 | `register(): Promise<void>` | Registers the tick on the injected `Cron`. Call once after construction. Idempotent (re-registering preserves `next_run_at`). |
 | `unregister(): Promise<void>` | Removes the tick from the injected `Cron`. |
-| `tickOnce(): Promise<number>` | Runs one tick immediately. Returns rows woken. Exposed for tests and on-demand wakes. |
+| `tickOnce(): Promise<SchedulerTickResult>` | Runs one tick immediately. Exposed for tests and on-demand wakes. |
+
+```typescript
+interface SchedulerTickResult {
+    woken: number;    // due `waiting` rows poked with a `timeout` advance
+    repoked: number;  // stranded `pending` rows poked with a `start` advance
+}
+```
+
+#### Per-tick behavior
+
+Each tick is **read-only** against `__workflow_instances` and runs two scans:
+
+1. `waiting` rows with `wake_at <= now()` → one `workflow.advance` poke each, `{ kind: 'timeout', outcome: 'TIMEOUT', expected_seq: row.seq }`.
+2. If `stalePendingSec > 0`: `pending` rows older than that → `{ kind: 'start', expected_seq: row.seq }`.
+
+The advance re-checks the precondition under the row lock (including that the timer really is due) and is what writes. So the counts are *pokes issued*, not instances moved, and a row poked but not yet advanced is simply poked again next tick — the fence turns the duplicate into a no-op. Nothing is stranded by a crash mid-tick.
 
 ---
 
@@ -165,7 +182,7 @@ import { Cron } from "@marianmeres/cron";
 new WorkflowInboxCorrelator(options: WorkflowInboxCorrelatorOptions)
 ```
 
-**`WorkflowInboxCorrelatorOptions`** has the same shape as `WorkflowSchedulerOptions` (cron / workflow / tickExpression / timezone / tickBatchSize / tickName), with `tickName` defaulting to `workflow.correlator.<tenantId>`.
+**`WorkflowInboxCorrelatorOptions`** takes the same fields as `WorkflowSchedulerOptions` minus `stalePendingSec` (cron / workflow / tickExpression / timezone / tickBatchSize / tickName), with `tickName` defaulting to `workflow.correlator.<tenantId>`.
 
 #### Methods
 
@@ -175,17 +192,29 @@ new WorkflowInboxCorrelator(options: WorkflowInboxCorrelatorOptions)
 |---|---|
 | `register(): Promise<void>` | Registers the tick on the injected `Cron`. Call once after construction. |
 | `unregister(): Promise<void>` | Removes the tick from the injected `Cron`. |
-| `tickOnce(): Promise<number>` | Runs one tick immediately. Returns signals processed. Exposed for tests and on-demand correlation. |
+| `tickOnce(): Promise<number>` | Runs one tick immediately. Returns rows **resolved** — poked, rejected, or marked processed. Deferred rows are not counted; they are still there next tick. |
 
 #### Per-tick behavior
 
-For each unprocessed inbox row (claimed via `FOR UPDATE SKIP LOCKED`):
+Rows are claimed `ORDER BY received_at LIMIT tickBatchSize` with `FOR UPDATE SKIP LOCKED`. For each row, the correlator looks up the **live** (non-terminal) instance owning `correlation_token`:
 
-1. Find a `waiting` instance with the same `correlation_token`. None → mark processed, done.
-2. Resolve `meta.matcher` on the instance's current state. Missing matcher (string id) → unregistered matcher → `signal_rejected` history, mark processed.
-3. Run the matcher with `{ instanceId, tenantId, context, signal }`.
-4. Matcher returns `false` → `signal_rejected` history, mark processed.
-5. Matcher returns `true` → `signal_received` history, flip instance to `pending`, mark processed, enqueue advance with `outcome: 'MATCHED'` and `outcome_data: signal.payload`.
+| Instance | Action |
+|---|---|
+| none, or terminal | mark processed + warn log (plus `signal_rejected` history if a terminal instance is found) |
+| live but not `waiting` | **defer** |
+| `waiting` at a node with no `MATCHED` (or `*`) edge | **defer** |
+| already poked earlier in this tick | **defer** |
+| `waiting`, matcher throws | **defer** (error log) |
+| `waiting`, matcher returns `false` | `signal_rejected` history, mark processed |
+| `waiting`, matcher returns `true` (or no matcher) | poke an advance: `{ kind: 'signal', expected_seq, inbox_id }` |
+
+**Defer** = leave the row unprocessed and look at it again next tick. An early signal — the instance is still running the step that emits the token, or sits at a timer-only node — is early, not wrong: consuming it would lose it, and delivering it to a node with no `MATCHED` edge would fail the instance.
+
+The correlator **never writes the instance row** and never marks a delivered row processed. The advance does both: it locks the inbox row, reads `outcome_data` off it, transitions, appends `signal_received`, and marks it processed in one transaction. A crashed poke is simply re-poked next tick.
+
+Pokes are enqueued *after* the claiming transaction commits — the advance would otherwise block on the inbox lock this tick still holds.
+
+Two known costs: a deterministically-throwing matcher retries and logs every tick, and a deferred backlog larger than `tickBatchSize` shadows newer rows.
 
 ---
 
@@ -246,7 +275,7 @@ const migrate = createMigrate(pool);
 await migrate.up("latest");
 ```
 
-Active version is stored in `__workflow_migrations`. The migration creates `__workflow_instances`, `__workflow_inbox`, `__workflow_history` and their indexes.
+Active version is stored in `__workflow_migrations`. `1.0.0` creates `__workflow_instances`, `__workflow_inbox`, `__workflow_history` and their indexes; `1.1.0` renames `project_id` → `tenant_id`; `1.2.0` adds the `seq` fencing column and the partial index behind the scheduler's stale-`pending` scan. Upgrading an existing 2.0.x database needs `up("latest")` once — until then instances have `seq = 0` and every write bumps it from there.
 
 ---
 
@@ -404,12 +433,15 @@ interface WorkflowInstanceRow {
     execution_state: ExecutionState;
     wake_at: Date | null;
     correlation_token: string | null;
+    seq: number;                            // fencing token
     created_at: Date;
     updated_at: Date;
 }
 ```
 
 Schema-aligned. `cursor` and `execution_state` are deliberately separate columns — see [Two Orthogonal States](./AGENTS.md#two-orthogonal-states).
+
+`seq` is the fencing token (schema 1.2.0). Every settle-point write bumps it; jobs carry the value they were issued against, so a duplicate or zombie job is recognized and dropped instead of being applied to a row that has moved on.
 
 ---
 
@@ -451,22 +483,42 @@ interface HistoryRow {
 ### `AdvanceJobPayload` / `EffectJobPayload`
 
 ```typescript
+type AdvanceKind = "start" | "effect" | "timeout" | "signal";
+
 interface AdvanceJobPayload {
     tenant_id: string;
     instance_id: string;
+    kind?: AdvanceKind;
+    expected_seq?: number;
     outcome?: string;
     outcome_data?: Record<string, unknown>;
-    timeout?: boolean;
+    inbox_id?: string;
+    handler?: string;
+    redispatch?: number;
 }
 
 interface EffectJobPayload {
     tenant_id: string;
     instance_id: string;
     handler: string;
+    seq?: number;
+    cursor?: string;
+    redispatch?: number;
 }
 ```
 
-Steve job payloads. You don't normally construct these directly — `Workflow.create` and the scheduler/correlator do it for you.
+Steve job payloads. You don't normally construct these directly — `Workflow.create`, the driver and the scheduler/correlator do it for you.
+
+| Field | Meaning |
+|---|---|
+| `kind` | What produced this advance. Selects the precondition the driver checks under the row lock: `start` → `pending`, `effect` → `running`, `signal` → `waiting`, `timeout` → `waiting` **and** a `wake_at` in the past. |
+| `expected_seq` / `seq` | The fence: the instance `seq` the job was issued against. The driver drops the job if the locked row has moved past it. On an effect job a row that is *behind* the fence means the dispatching transaction has not committed yet — the job throws so steve retries. |
+| `inbox_id` | `kind: "signal"` only. The advance reads the outcome data off that row and marks it processed in the same transaction as the transition. |
+| `handler` | `kind: "effect"` only; used for the `effect_completed` history entry. |
+| `cursor` | Node that dispatched the effect. Diagnostics only. |
+| `redispatch` | How many times this payload has been re-queued after its job expired. Bounded by `redispatchLimit`; absent on a first dispatch. |
+
+**Absent `kind` / `expected_seq` / `seq` means unfenced** — a job enqueued by 2.0.x and still queued at upgrade time. The driver infers the kind from the payload shape and skips both the fence and the preconditions rather than swallowing the job. A transitional shim; it will be removed together with the `project_id` fallback in a later major.
 
 ---
 
@@ -478,6 +530,8 @@ Steve job payloads. You don't normally construct these directly — `Workflow.cr
 | `WorkflowSnapshot` | `FSMSnapshot<string, WorkflowContext>` — passthrough re-export for convenience |
 | `ExecutionState` | Union of execution-state strings |
 | `HistoryEventType` | Union of history-event-type strings |
+| `AdvanceKind` | `"start" \| "effect" \| "timeout" \| "signal"` — see [job payloads](#advancejobpayload--effectjobpayload) |
+| `SchedulerTickResult` | `{ woken, repoked }` — what one `WorkflowScheduler` tick poked |
 
 ---
 

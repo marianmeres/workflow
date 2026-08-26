@@ -101,7 +101,12 @@ await createMigrate(pool).up("latest");
 // workflow framework attaches its handlers to them and the consumer owns
 // the start/stop lifecycle. Share them with your app's other job/cron work
 // if you want — they coexist by type/name on the same underlying tables.
-const jobs = new Jobs({ db: pool });
+//
+// `autoCleanup` is not optional in practice: it runs steve's reaper, which
+// is the only thing that notices a job whose worker died mid-run. Without
+// it such a job sits in `running` forever and its instance never moves
+// again. See "Persistence Guarantees" below.
+const jobs = new Jobs({ db: pool, autoCleanup: true });
 const cron = new Cron({ db: pool });
 
 // 4. Construct the Workflow. It registers `workflow.advance` + one
@@ -173,18 +178,23 @@ await jobs.stop();
                           PostgreSQL
 ```
 
-The framework owns no runtime processes. It registers job and cron handlers on the `Jobs` and `Cron` instances you pass in; you call `start()` / `stop()` on them. This lets the workflow's jobs/crons coexist with your application's own — they share `__job` / `__cron` tables and coexist by `type` / `name`. Sharing one runtime per process is cheaper than running parallel pollers.
+The framework owns no runtime processes. It registers job and cron handlers on the `Jobs` and `Cron` instances you pass in; you call `start()` / `stop()` on them. This lets the workflow's jobs/crons coexist with your application's own — they share `__job` / `__cron` tables and coexist by `type` / `name`. Sharing one runtime per process is cheaper than running parallel pollers — and safer: a `Jobs` or `Cron` that polls these tables without the workflow handlers attached silently noops the work it claims (see [Failure Modes](#failure-modes)).
 
-A single steve job type — **`workflow.advance`** — encapsulates one step of the driver. Its payload is `{ tenant_id, instance_id, outcome?, outcome_data? }`. The handler:
+A single steve job type — **`workflow.advance`** — encapsulates one step of the driver. Its payload is `{ tenant_id, instance_id, kind, expected_seq, outcome?, outcome_data?, inbox_id? }`. The handler:
 
 1. Locks the instance row inside a transaction.
-2. If an `outcome` was supplied (wake from effect / signal / timer), applies it via `fsm.transition(outcome, data)`. If the FSM rejects, the instance is marked `failed`.
-3. Loops on the current state's `meta.kind`, settling at the first terminal / effectful / suspending state and persisting the new cursor + execution_state in the same transaction.
-4. For effectful nodes, enqueues a **`workflow.effect.<handlerName>`** steve job. On its success, the effect handler enqueues a fresh advance carrying the outcome. On terminal failure, the instance is marked `failed`.
+2. Drops the job if the instance is already terminal, if `expected_seq` no longer matches the row's `seq` (the fence — see below), or if the row is not in the state this `kind` of advance expects.
+3. If an `outcome` was supplied (wake from effect / signal / timer), applies it via `fsm.transition(outcome, data)`. If the FSM rejects, the instance is marked `failed`.
+4. Loops on the current state's `meta.kind`, settling at the first terminal / effectful / suspending state and persisting the new cursor + execution_state — and bumping `seq` — in the same transaction.
+5. For effectful nodes, enqueues a **`workflow.effect.<handlerName>`** steve job carrying that new `seq`. On its success, the effect handler enqueues a fresh advance carrying the outcome. On terminal failure, the instance is marked `failed`.
 
-The **scheduler** runs as a registered cron job (default `* * * * *`). Each tick atomically flips `waiting` + `wake_at <= now()` rows to `pending`, clears `wake_at`, and enqueues a `workflow.advance` with `outcome: 'TIMEOUT'`.
+**The advance is the only writer of instance rows.** Everything else — the scheduler, the correlator — only *pokes*: it reads what looks due and enqueues an advance for it. A poke that is lost to a crash costs nothing, because whatever made the row look due is still true next tick; a poke that arrives twice costs nothing, because the second one is fenced out.
 
-The **correlator** runs as a registered cron job (default `* * * * *`). Each tick claims a batch of unprocessed `__workflow_inbox` rows, finds the waiting instance with the matching `correlation_token`, runs the user's `matcher` for the current state, and enqueues a `workflow.advance` with `outcome: 'MATCHED'` plus the signal payload.
+The **fence** is the `seq` column. Every settle-point write bumps it, and every advance/effect job carries the value it was issued against. A job whose value no longer matches belongs to a step the instance has already left — a duplicate, or a zombie from a worker that hung — and is dropped with a debug log rather than applied to a row that moved on.
+
+The **scheduler** runs as a registered cron job (default `* * * * *`). Each tick is read-only: it selects `waiting` rows whose `wake_at` has passed and pokes one `TIMEOUT` advance per row (the advance re-checks due-ness under the lock and clears `wake_at`). A second scan pokes instances stuck in `pending` for longer than `stalePendingSec` — the residue of a crash between `create()`'s commit and steve's job insert, which happens on its own connection.
+
+The **correlator** runs as a registered cron job (default `* * * * *`). Each tick claims a batch of unprocessed `__workflow_inbox` rows, finds the live instance owning the `correlation_token`, runs the user's `matcher` for the current state, and pokes a `MATCHED` advance carrying the *inbox row id*. The advance re-reads that row under a lock and marks it processed in the same transaction as the transition, so a signal is never consumed without being delivered.
 
 ## Versioning Definitions
 
@@ -192,18 +202,41 @@ Each instance row stores `definition_version`. The framework looks up the defini
 
 ## Persistence Guarantees & Idempotency
 
-- The advance step is a single PG transaction: cursor / execution_state / wake_at / history are all written together with the effect-job insert.
-- Steve retries effect handlers per `effectMaxAttempts`. A worker crash mid-effect leaves the job in `running`; steve auto-cleanup reaps it after `~5min` and retries.
-- **Handlers must be idempotent.** A handler can run multiple times for the same instance if a worker crashes after the side effect but before steve records completion. Use upserts, idempotency keys, or check the existing state.
+- **The instance write is one PG transaction.** Cursor, execution_state, wake_at, `seq` and history are written together, and a signal delivery marks its inbox row processed in that same transaction. The follow-up *job* insert is not part of it: steve creates jobs on its own connection, so a job can exist for a transaction that ended up rolling back.
+- **Job delivery is therefore at-least-once, and fenced.** A duplicate advance or effect job is recognized by `seq` and dropped. The fence is what makes the extra deliveries harmless, not their absence. `seq` arrives with schema 1.2.0 — run `createMigrate(pool).up("latest")` when upgrading.
+- **Handlers must be idempotent.** The fence protects the *instance row*, not the outside world. A handler can still run twice — a worker that completed the side effect and then died before steve recorded the attempt gets retried. Use upserts, idempotency keys, or check the existing state.
+- **Run `Jobs` with `autoCleanup: true`** (or call `jobs.cleanup()` periodically). Steve's reaper is the only thing that marks a job whose worker died as `expired`; without it that job stays `running` forever and its instance never moves again. With it, the framework re-queues the identical payload up to `redispatchLimit` times before giving up and failing the instance — the fence makes the re-queue a no-op if the dead worker's transaction did commit.
+- **A `pending` instance is re-poked** after `stalePendingSec` (default 300s), which covers the crash window between `create()`'s commit and steve's job insert.
+
+## Signals: early, late, deferred
+
+`appendInbox` never blocks on the instance being ready for the signal. What the correlator does with a row depends on what it finds behind the token:
+
+| Situation | What happens |
+|---|---|
+| Instance is `waiting` at a node that accepts `MATCHED`, matcher says yes | Advance poked; `signal_received` + the transition commit with the row's `processed_at` |
+| Matcher says no | `signal_rejected` history; row marked processed |
+| Matcher throws | Row deferred — re-examined next tick, with an error log |
+| Instance is live but not `waiting` yet (still running the step that emits the token) | Row deferred |
+| Instance is `waiting` at a node with no `MATCHED` edge (e.g. a timer-only delay) | Row deferred |
+| No live instance owns the token, or it is `failed`/`cancelled` | Row marked processed with a warn log (plus `signal_rejected` history if a terminal instance exists) |
+
+"Deferred" means the row stays unprocessed and is looked at again on the next tick — an early signal is early, not wrong. Only one signal per instance is poked per tick; the rest defer, because a second one would be fenced out anyway.
+
+Two consequences worth knowing: a deferred row is retried indefinitely (a permanently-throwing matcher logs on every tick), and rows are claimed `ORDER BY received_at LIMIT tickBatchSize`, so a deferred backlog larger than the batch would shadow newer rows.
 
 ## Failure Modes
 
 | Failure | Behavior |
 |---|---|
-| Effect handler throws repeatedly | Instance marked `failed`; `effect_failed` history entry. |
+| Effect handler throws repeatedly | Steve retries the job `effectMaxAttempts` times, then the instance is marked `failed`; `effect_failed` history entry. |
+| Advance job throws repeatedly | Steve retries the job `advanceMaxAttempts` times (default 10, ~17min of backoff), then the instance is marked `failed` with the last attempt's error message. |
+| Worker dies mid-job | Steve's reaper (needs `autoCleanup`) marks the job `expired` — steve never retries those. The framework re-queues the identical payload, up to `redispatchLimit` dispatches in total, then fails the instance. |
+| Lost advance: the side effect happened but the follow-up advance was never enqueued | The effect job is retried (if the enqueue threw) or re-dispatched after expiry (if the process died). Either way the handler runs again — the instance never left that `seq`, so the fence lets it through — and the advance is enqueued. **This is why handlers must be idempotent.** |
 | FSM rejects the outcome label | Instance marked `failed`; `transition_rejected` history entry. |
 | Pure node with no guard matching | Instance marked `failed`; `transition_rejected` history entry. |
 | Definition missing on advance | Instance marked `failed`. Keep old versions registered until drained. |
+| A second `Jobs` or `Cron` in a process that never registered the workflow handlers | **Silent data loss.** Both libraries fall back to a noop for an unknown `type` / `name`: steve marks the job completed, cron marks the tick run and advances `next_run_at`. Share one runtime per process, or make sure every process that starts a `Jobs`/`Cron` on these tables also constructs the `Workflow` and calls `register()`. |
 
 ## Observability
 
@@ -216,7 +249,11 @@ const events = await getHistory(pool, instanceId);
 
 ## Multi-tenancy
 
-Pass `tenantId` to `Workflow`, `WorkflowScheduler`, and `WorkflowInboxCorrelator`. All three tables (and Cron's internal tables) carry `tenant_id`. One process can scope workers to a tenant while another scopes to a different tenant; the `FOR UPDATE SKIP LOCKED` claiming keeps them disjoint.
+Pass `tenantId` to `Workflow`, `WorkflowScheduler`, and `WorkflowInboxCorrelator`. All three tables (and Cron's internal tables) carry `tenant_id`, so instances, inbox rows, history, and the tick registrations are scoped: a `Workflow` only ever sees its own tenant's rows.
+
+**The queues are not scoped, though.** Both steve and cron claim the next due row globally — no tenant filter, no type filter — and both fall back to a noop for work they have no handler for. So running one process per tenant against a shared database does *not* isolate them: process A will claim process B's jobs and cron ticks, and silently noop the ones whose handler it does not have. That is safe only when every such process registers the *same* definitions, handlers, and ticks (which makes the per-process scoping pointless anyway).
+
+The supported shape today is one runtime per database, serving whichever tenants it has definitions for. Tenant scoping is for keeping data apart, not for partitioning workers.
 
 ## Breaking changes in 2.0
 

@@ -23,7 +23,10 @@
  * const pool = new pg.Pool({ /* ... *\/ });
  * await createMigrate(pool).up("latest");
  *
- * const jobs = new Jobs({ db: pool });
+ * // `autoCleanup` runs steve's reaper, which is what turns a crashed worker
+ * // into an `expired` job the framework can re-dispatch. Without it such a
+ * // job stays `running` forever and its instance never moves again.
+ * const jobs = new Jobs({ db: pool, autoCleanup: true });
  * const wf = new Workflow({
  *     db: pool,
  *     jobs,
