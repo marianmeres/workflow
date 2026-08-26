@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<title>@marianmeres/workflow — example</title>
+		<meta
+			name="description"
+			content="Start a durable workflow instance and watch it move: the cursor walking the graph, the execution state beside it, the timer counting down, and every signal, transition and failure as it lands in PostgreSQL."
+		/>
+		<!-- Tracks the active (manually toggled) theme; updated by main.ts. -->
+		<meta name="theme-color" content="#fafafa" />
+		<link
+			rel="icon"
+			href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%2210 0 100 100%22><text y=%22.90em%22 font-size=%2290%22>🔁</text></svg>"
+		/>
+
+		<!--
+			Styling follows @marianmeres/design-tokens with the Reboot bridge:
+			  · reboot.css — Bootstrap Reboot element normalize/reset (consumes --bs-*)
+			  · theme.css  — design-tokens "slateCyan" theme + reboot bridge
+			                 (sets --stuic-color-* AND the --bs-* vars; dark on :root.dark)
+			  · the inline block below — minimal, token-driven example layout
+		-->
+		<link rel="stylesheet" href="./reboot.css" />
+		<link rel="stylesheet" href="./theme.css" />
+
+		<!--
+			Anti-FOUC: set the dark class before first paint so dark-preference
+			users don't flash light. main.ts re-confirms this idempotently.
+			The storage key must match THEME_KEY in main.ts.
+		-->
+		<script>
+		try {
+			var k = "workflow-example-theme";
+			var s = localStorage.getItem(k);
+			var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+			document.documentElement.classList.toggle("dark", d);
+		} catch (e) {}
+		</script>
+
+		<style>
+		:root {
+			color-scheme: light;
+		}
+		:root.dark {
+			color-scheme: dark;
+		}
+
+		.app {
+			max-width: 84rem;
+			margin: 0 auto;
+			padding: clamp(1rem, 4vw, 2.5rem) clamp(1rem, 4vw, 2rem);
+		}
+
+		/* ---- header ---- */
+
+		.app-header {
+			display: flex;
+			align-items: flex-start;
+			justify-content: space-between;
+			gap: 1rem;
+			margin-bottom: 1.75rem;
+		}
+		.app-header h1 {
+			margin: 0 0 0.3rem;
+			font-size: 1.05rem;
+			font-weight: 600;
+			line-height: 1.3;
+		}
+		.app-header h1 a {
+			color: inherit;
+			text-decoration: none;
+		}
+		.lead {
+			max-width: 74ch;
+			margin: 0;
+			color: var(--stuic-color-muted-foreground);
+			font-size: 0.9rem;
+		}
+		.theme-toggle {
+			flex: none;
+			width: 2.75rem;
+			height: 2.75rem;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.5rem;
+			background: var(--stuic-color-surface);
+			color: var(--stuic-color-surface-foreground);
+			font-size: 1.1rem;
+			line-height: 1;
+			cursor: pointer;
+		}
+		.theme-toggle:hover {
+			background: var(--stuic-color-surface-hover);
+		}
+
+		/* ---- layout ---- */
+
+		.layout {
+			display: grid;
+			grid-template-columns: minmax(0, 21rem) minmax(0, 1fr);
+			gap: 1.5rem;
+			align-items: start;
+		}
+		@media (max-width: 68rem) {
+			.layout {
+				grid-template-columns: minmax(0, 1fr);
+			}
+		}
+
+		.card {
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.7rem;
+			background: var(--stuic-color-surface);
+			color: var(--stuic-color-surface-foreground);
+			padding: 1rem 1.1rem;
+		}
+		.card + .card {
+			margin-top: 1rem;
+		}
+		.card h2 {
+			margin: 0 0 0.75rem;
+			font-size: 0.8rem;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.06em;
+			color: var(--stuic-color-muted-foreground);
+		}
+		.card h2 .n {
+			text-transform: none;
+			letter-spacing: 0;
+			font-weight: 400;
+		}
+
+		/* ---- form ---- */
+
+		.field {
+			margin-bottom: 0.85rem;
+		}
+		.field > label,
+		.field > div > label,
+		.legend {
+			display: block;
+			margin-bottom: 0.25rem;
+			font-size: 0.78rem;
+			font-weight: 500;
+			color: var(--stuic-color-muted-foreground);
+		}
+		input[type="text"],
+		input[type="number"],
+		select {
+			width: 100%;
+			padding: 0.42rem 0.55rem;
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.4rem;
+			background: var(--stuic-color-background);
+			color: var(--stuic-color-foreground);
+			font-size: 0.85rem;
+			font-family: inherit;
+		}
+		input:focus-visible,
+		select:focus-visible,
+		button:focus-visible {
+			outline: 2px solid var(--stuic-color-ring);
+			outline-offset: 1px;
+		}
+		.grid-2 {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 0.6rem;
+		}
+		.checks {
+			display: grid;
+			gap: 0.35rem;
+		}
+		.checks label {
+			display: flex;
+			align-items: flex-start;
+			gap: 0.45rem;
+			margin: 0;
+			font-size: 0.82rem;
+			cursor: pointer;
+		}
+		.checks input {
+			margin: 0.2rem 0 0;
+			flex: none;
+		}
+
+		.switch {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 0.35rem;
+			padding: 0.25rem;
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.5rem;
+			background: var(--stuic-color-background);
+		}
+		.switch label {
+			display: block;
+			margin: 0;
+			text-align: center;
+			padding: 0.35rem 0.4rem;
+			border-radius: 0.35rem;
+			font-size: 0.8rem;
+			cursor: pointer;
+			color: var(--stuic-color-muted-foreground);
+		}
+		.switch input {
+			position: absolute;
+			opacity: 0;
+			pointer-events: none;
+		}
+		.switch input:checked + span {
+			display: block;
+			margin: -0.35rem -0.4rem;
+			padding: 0.35rem 0.4rem;
+			border-radius: 0.35rem;
+			background: var(--stuic-color-primary);
+			color: var(--stuic-color-primary-foreground);
+			font-weight: 500;
+		}
+
+		/* ---- buttons ---- */
+
+		button.primary,
+		button.ghost {
+			padding: 0.5rem 0.7rem;
+			border-radius: 0.45rem;
+			font-size: 0.85rem;
+			font-weight: 500;
+			cursor: pointer;
+			border: 1px solid transparent;
+		}
+		button.primary {
+			background: var(--stuic-color-primary);
+			color: var(--stuic-color-primary-foreground);
+		}
+		button.ghost {
+			background: var(--stuic-color-surface);
+			color: var(--stuic-color-surface-foreground);
+			border-color: var(--stuic-color-border);
+		}
+		button.wide {
+			width: 100%;
+			margin-top: 0.4rem;
+		}
+		button:disabled {
+			opacity: 0.45;
+			cursor: not-allowed;
+		}
+		button.primary:not(:disabled):hover {
+			background: var(--stuic-color-primary-hover);
+		}
+		button.ghost:not(:disabled):hover {
+			background: var(--stuic-color-surface-hover);
+		}
+		.actions {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 0.4rem;
+		}
+		.actions button {
+			font-size: 0.8rem;
+			padding: 0.35rem 0.6rem;
+		}
+
+		/* ---- badges, small text ---- */
+
+		.badge {
+			display: inline-block;
+			padding: 0.1rem 0.45rem;
+			border-radius: 999px;
+			border: 1px solid var(--stuic-color-border);
+			font-size: 0.72rem;
+			font-weight: 500;
+			white-space: nowrap;
+		}
+		.badge-run {
+			border-color: var(--stuic-color-accent);
+			color: var(--stuic-color-accent);
+		}
+		.badge-wait {
+			border-color: var(--stuic-color-warning);
+			color: var(--stuic-color-warning);
+		}
+		.badge-ok {
+			border-color: var(--stuic-color-success);
+			color: var(--stuic-color-success);
+		}
+		.badge-bad {
+			border-color: var(--stuic-color-destructive);
+			color: var(--stuic-color-destructive);
+		}
+		.muted {
+			color: var(--stuic-color-muted-foreground);
+			font-size: 0.78rem;
+		}
+		.mono {
+			font-family: var(--bs-font-monospace);
+		}
+		.spacer {
+			flex: 1;
+		}
+		.status-row {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 0.4rem;
+			margin-bottom: 0.75rem;
+		}
+		.error-box {
+			margin-top: 0.75rem;
+			padding: 0.5rem 0.65rem;
+			border: 1px solid var(--stuic-color-surface-destructive-border);
+			background: var(--stuic-color-surface-destructive);
+			color: var(--stuic-color-surface-destructive-foreground);
+			border-radius: 0.45rem;
+			font-size: 0.8rem;
+		}
+		.hint {
+			margin: 0.5rem 0 0;
+			font-size: 0.75rem;
+			line-height: 1.5;
+			color: var(--stuic-color-muted-foreground);
+		}
+		.hint code {
+			font-size: 0.95em;
+		}
+
+		/* ---- tick counters ---- */
+
+		.counters {
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 0.4rem;
+			margin-top: 0.7rem;
+		}
+		.counters div {
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.45rem;
+			padding: 0.35rem 0.4rem;
+			background: var(--stuic-color-background);
+			text-align: center;
+		}
+		.counters b {
+			display: block;
+			font-size: 0.95rem;
+			font-variant-numeric: tabular-nums;
+		}
+		.counters span {
+			font-size: 0.62rem;
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			color: var(--stuic-color-muted-foreground);
+		}
+
+		/* ---- instances list ---- */
+
+		.instances {
+			list-style: none;
+			margin: 0;
+			padding: 0;
+			max-height: 22rem;
+			overflow: auto;
+		}
+		.instances li + li {
+			margin-top: 0.25rem;
+		}
+		.instances button {
+			display: block;
+			width: 100%;
+			text-align: left;
+			border: 1px solid transparent;
+			border-radius: 0.45rem;
+			background: none;
+			color: inherit;
+			padding: 0.35rem 0.45rem;
+			cursor: pointer;
+			font-size: 0.8rem;
+		}
+		.instances button:hover {
+			background: var(--stuic-color-surface-hover);
+		}
+		.instances button[aria-current="true"] {
+			border-color: var(--stuic-color-primary);
+			background: var(--stuic-color-surface-primary);
+			color: var(--stuic-color-surface-primary-foreground);
+		}
+		.instances .row1 {
+			display: flex;
+			align-items: center;
+			gap: 0.35rem;
+		}
+		.instances .row1 b {
+			font-weight: 500;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.instances .row2 {
+			font-size: 0.7rem;
+			color: var(--stuic-color-muted-foreground);
+		}
+
+		/* ---- the graph ---- */
+
+		.graph {
+			display: grid;
+			gap: 0.4rem;
+		}
+		.node {
+			border: 1px solid var(--stuic-color-border);
+			border-radius: 0.55rem;
+			padding: 0.5rem 0.65rem;
+			background: var(--stuic-color-background);
+		}
+		/* Visited: the instance has been here. Current: it is here now. */
+		.node.is-visited {
+			border-left: 3px solid var(--stuic-color-muted-foreground);
+		}
+		.node.is-current {
+			border-color: var(--stuic-color-accent);
+			border-left: 3px solid var(--stuic-color-accent);
+			background: var(--stuic-color-surface-accent);
+			color: var(--stuic-color-surface-accent-foreground);
+		}
+		.node .head {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 0.4rem;
+		}
+		.node .name {
+			font-family: var(--bs-font-monospace);
+			font-size: 0.85rem;
+			font-weight: 600;
+		}
+		.node .kind {
+			font-size: 0.65rem;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			padding: 0.05rem 0.35rem;
+			border-radius: 0.3rem;
+			background: var(--stuic-color-muted);
+			color: var(--stuic-color-muted-foreground);
+		}
+		.node .detail {
+			font-size: 0.72rem;
+			color: var(--stuic-color-muted-foreground);
+		}
+		.node.is-current .detail {
+			color: inherit;
+			opacity: 0.85;
+		}
+		.node .edges {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 0.3rem 0.8rem;
+			margin-top: 0.3rem;
+			font-size: 0.72rem;
+			font-family: var(--bs-font-monospace);
+			color: var(--stuic-color-muted-foreground);
+		}
+		.node.is-current .edges {
+			color: inherit;
+			opacity: 0.9;
+		}
+		.node .edges em {
+			font-style: normal;
+			font-weight: 600;
+		}
+
+		/* ---- tabs + tables ---- */
+
+		.tabs {
+			display: flex;
+			gap: 0.25rem;
+			border-bottom: 1px solid var(--stuic-color-border);
+			margin-bottom: 0.6rem;
+		}
+		.tabs button {
+			border: 0;
+			background: none;
+			padding: 0.45rem 0.7rem;
+			font-size: 0.83rem;
+			color: var(--stuic-color-muted-foreground);
+			border-bottom: 2px solid transparent;
+			margin-bottom: -1px;
+			cursor: pointer;
+		}
+		.tabs button[aria-selected="true"] {
+			color: var(--stuic-color-foreground);
+			border-bottom-color: var(--stuic-color-primary);
+			font-weight: 500;
+		}
+		.scroll {
+			max-height: 26rem;
+			overflow: auto;
+		}
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 0.78rem;
+		}
+		thead th {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			background: var(--stuic-color-surface);
+			text-align: left;
+			font-weight: 500;
+			font-size: 0.7rem;
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			color: var(--stuic-color-muted-foreground);
+			padding: 0.3rem 0.4rem;
+			border-bottom: 1px solid var(--stuic-color-border);
+		}
+		tbody td {
+			padding: 0.3rem 0.4rem;
+			border-bottom: 1px solid var(--stuic-color-border);
+			vertical-align: top;
+		}
+		tbody tr:last-child td {
+			border-bottom: 0;
+		}
+		td.mono,
+		td .mono {
+			font-family: var(--bs-font-monospace);
+			font-size: 0.95em;
+		}
+		td.wrap {
+			word-break: break-word;
+		}
+		tr.is-unprocessed td {
+			background: var(--stuic-color-surface-warning);
+			color: var(--stuic-color-surface-warning-foreground);
+		}
+		tr.is-mine td:first-child {
+			border-left: 2px solid var(--stuic-color-primary);
+		}
+		.ev {
+			display: inline-block;
+			padding: 0.02rem 0.35rem;
+			border-radius: 0.3rem;
+			font-size: 0.68rem;
+			background: var(--stuic-color-muted);
+			color: var(--stuic-color-muted-foreground);
+			white-space: nowrap;
+		}
+		.ev.ev-bad {
+			background: var(--stuic-color-surface-destructive);
+			color: var(--stuic-color-surface-destructive-foreground);
+		}
+		.ev.ev-ok {
+			background: var(--stuic-color-surface-success);
+			color: var(--stuic-color-surface-success-foreground);
+		}
+		.ev.ev-warn {
+			background: var(--stuic-color-surface-warning);
+			color: var(--stuic-color-surface-warning-foreground);
+		}
+		.placeholder {
+			color: var(--stuic-color-muted-foreground);
+			font-size: 0.8rem;
+			padding: 0.75rem 0;
+			margin: 0;
+		}
+
+		/* ---- key/value + context ---- */
+
+		dl.kv {
+			display: grid;
+			grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+			gap: 0.15rem 0.75rem;
+			margin: 0;
+			font-size: 0.78rem;
+		}
+		dl.kv dt {
+			font-weight: 400;
+			color: var(--stuic-color-muted-foreground);
+		}
+		dl.kv dd {
+			margin: 0;
+			font-family: var(--bs-font-monospace);
+			word-break: break-word;
+		}
+		pre.json {
+			margin: 0.5rem 0 0;
+			padding: 0.55rem 0.65rem;
+			border-radius: 0.45rem;
+			background: var(--stuic-color-background);
+			border: 1px solid var(--stuic-color-border);
+			font-size: 0.73rem;
+			line-height: 1.5;
+			max-height: 16rem;
+			overflow: auto;
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+		.footer {
+			margin-top: 2rem;
+			font-size: 0.75rem;
+			color: var(--stuic-color-muted-foreground);
+		}
+		.footer a {
+			color: inherit;
+		}
+		</style>
+	</head>
+
+	<body>
+		<div id="app"></div>
+
+		<template id="tpl-app">
+			<div class="app">
+				<header class="app-header">
+					<div>
+						<h1>
+							<a
+								href="https://jsr.io/@marianmeres/workflow"><code>@marianmeres/workflow</code></a>
+							<span class="muted" data-ref="version"></span>
+						</h1>
+						<p class="lead">
+							Start an instance and watch it move. The highlighted node is
+							the <b>cursor</b>; the badge next to it is the
+							<b>execution state</b>. They are two different questions, and
+							the whole engine is built on not confusing them. Everything
+							on this page was read back out of PostgreSQL — stop the
+							server mid-wait, start it again, and nothing here changes.
+						</p>
+					</div>
+					<button class="theme-toggle" type="button" title="Toggle theme"
+						data-on="click:toggleTheme">◑</button>
+				</header>
+
+				<div class="layout">
+					<!-- ---- controls ---- -->
+					<div>
+						<form class="card" data-ref="form" data-on="submit:submit">
+							<h2>New expense</h2>
+
+							<div class="field">
+								<label for="title">What for</label>
+								<input id="title" type="text" data-ref="title"
+									spellcheck="false" />
+							</div>
+
+							<div class="field grid-2">
+								<div>
+									<label for="amount">Amount (EUR)</label>
+									<input id="amount" type="number" min="0" step="10"
+										data-ref="amount" />
+								</div>
+								<div>
+									<label
+										for="autoApproveBelow">Auto-approve below</label>
+									<input id="autoApproveBelow" type="number" min="0"
+										step="10" data-ref="autoApproveBelow" />
+								</div>
+							</div>
+							<p class="hint">
+								Below the limit, the <code>triage</code> node routes
+								straight to <code>book</code> and no approval is ever
+								requested. That branch is a pure node: no job, no wait,
+								no row of its own — it happens inside the first advance.
+							</p>
+
+							<div class="field">
+								<label for="approver">Approver</label>
+								<input id="approver" type="text" data-ref="approver"
+									spellcheck="false"
+									placeholder="leave empty to fail delivery" />
+							</div>
+
+							<div class="field">
+								<label for="maxNotify">Notification attempts</label>
+								<select id="maxNotify" data-ref="maxNotify">
+									<option value="1">1 — no reminder</option>
+									<option value="2" selected>2 — one reminder</option>
+									<option value="3">3 — two reminders</option>
+								</select>
+							</div>
+
+							<div class="field checks">
+								<label>
+									<input type="checkbox" data-ref="failBooking" />
+									<span>Make <code>bookExpense</code> throw once
+										(a transient fault, the kind
+										<code>retry()</code> is for)</span>
+								</label>
+								<label>
+									<input type="checkbox" data-ref="approveNow" />
+									<span>Approve it immediately — before it reaches
+										the wait, so you can watch the signal sit
+										deferred</span>
+								</label>
+							</div>
+
+							<button class="primary wide" type="submit"
+								data-ref="createBtn">Create instance</button>
+						</form>
+
+						<div class="card">
+							<h2>Ticks</h2>
+							<div class="switch">
+								<label>
+									<input type="radio" name="tickmode" value="auto"
+										data-ref="tickAuto" checked />
+									<span>auto · 500ms</span>
+								</label>
+								<label>
+									<input type="radio" name="tickmode" value="manual"
+										data-ref="tickManual" />
+									<span>manual</span>
+								</label>
+							</div>
+							<div class="actions" style="margin-top: 0.5rem">
+								<button class="ghost" type="button"
+									data-ref="tickSchedulerBtn"
+									data-on="click:tickScheduler">Tick scheduler</button>
+								<button class="ghost" type="button"
+									data-ref="tickCorrelatorBtn"
+									data-on="click:tickCorrelator">Tick correlator</button>
+							</div>
+							<div class="counters">
+								<div><b data-ref="cTicks">0</b><span>ticks</span></div>
+								<div><b data-ref="cWoken">0</b><span>woken</span></div>
+								<div><b data-ref="cRepoked">0</b><span>re-poked</span></div>
+								<div><b data-ref="cResolved">0</b><span>signals</span></div>
+							</div>
+							<p class="hint" data-ref="tickHint"></p>
+						</div>
+
+						<div class="card">
+							<h2>Instances</h2>
+							<ul class="instances" data-ref="instances"></ul>
+							<p class="placeholder" data-ref="instancesEmpty">
+								Nothing yet.
+							</p>
+						</div>
+					</div>
+
+					<!-- ---- the instance ---- -->
+					<div>
+						<div class="card">
+							<div class="status-row">
+								<span class="badge"
+									data-ref="stateBadge">no instance</span>
+								<span class="mono" data-ref="cursorLabel"></span>
+								<span class="spacer"></span>
+								<span class="muted" data-ref="countdown"></span>
+							</div>
+
+							<div class="actions">
+								<button class="primary" type="button" data-kind="approve"
+									data-ref="approveBtn"
+									data-on="click:signal">Approve</button>
+								<button class="ghost" type="button" data-kind="reject"
+									data-ref="rejectBtn"
+									data-on="click:signal">Reject</button>
+								<button class="ghost" type="button" data-kind="junk"
+									data-ref="junkBtn"
+									data-on="click:signal">Signal the matcher declines</button>
+								<button class="ghost" type="button" data-kind="stray"
+									data-ref="strayBtn"
+									data-on="click:signal">Signal for an unknown token</button>
+								<span class="spacer"></span>
+								<button class="ghost" type="button" data-ref="retryBtn"
+									data-on="click:retry">Retry</button>
+								<button class="ghost" type="button" data-ref="cancelBtn"
+									data-on="click:cancel">Cancel</button>
+							</div>
+
+							<div class="error-box" data-ref="errorBox" hidden></div>
+
+							<p class="placeholder" data-ref="instanceEmpty">
+								Nothing selected. Create an instance on the left, or
+								pick one from the list — they are rows, so they are all
+								still there.
+							</p>
+
+							<dl class="kv" data-ref="kv" style="margin-top: 0.85rem"></dl>
+							<pre class="json" data-ref="context" hidden></pre>
+						</div>
+
+						<div class="card">
+							<h2>Graph <span class="n" data-ref="graphTitle"></span></h2>
+							<div class="graph" data-ref="graph"></div>
+							<p class="hint" data-ref="graphHint"></p>
+						</div>
+
+						<div class="card">
+							<div class="tabs" data-ref="tabs">
+								<button type="button" data-tab="history"
+									aria-selected="true" data-on="click:tab">History
+									<span data-ref="cHistory">0</span></button>
+								<button type="button" data-tab="inbox"
+									aria-selected="false" data-on="click:tab">Inbox
+									<span data-ref="cInbox">0</span></button>
+							</div>
+
+							<div data-ref="paneHistory">
+								<div class="scroll">
+									<table>
+										<thead>
+											<tr>
+												<th>at</th>
+												<th>event</th>
+												<th>from → to</th>
+												<th>data</th>
+											</tr>
+										</thead>
+										<tbody data-ref="historyBody"></tbody>
+									</table>
+								</div>
+								<p class="placeholder" data-ref="historyEmpty">
+									Nothing yet — every transition, dispatch, signal and
+									failure lands in <code>__workflow_history</code>.
+								</p>
+							</div>
+
+							<div data-ref="paneInbox" hidden>
+								<div class="scroll">
+									<table>
+										<thead>
+											<tr>
+												<th>received</th>
+												<th>token</th>
+												<th>payload</th>
+												<th>processed</th>
+											</tr>
+										</thead>
+										<tbody data-ref="inboxBody"></tbody>
+									</table>
+								</div>
+								<p class="placeholder" data-ref="inboxEmpty">
+									No signals yet.
+								</p>
+								<p class="hint">
+									Highlighted rows are still unprocessed. A row stays
+									that way while the instance it belongs to is not
+									<code>waiting</code> yet — an early signal is early,
+									not wrong, and consuming it would lose it.
+								</p>
+							</div>
+						</div>
+
+						<p class="footer">
+							The graph, the handlers and the matcher live in
+							<code>example/workflow.ts</code>; the runtime and this API
+							in <code>example/server.ts</code>. See
+							<a href="https://jsr.io/@marianmeres/workflow">the docs</a>
+							for what the framework is doing between them.
+						</p>
+					</div>
+				</div>
+			</div>
+		</template>
+
+		<template id="tpl-node">
+			<div class="node">
+				<div class="head">
+					<span class="name" data-ref="name"></span>
+					<span class="kind" data-ref="kind"></span>
+					<span class="detail" data-ref="detail"></span>
+					<span class="spacer"></span>
+					<span class="badge" data-ref="here" hidden></span>
+				</div>
+				<div class="edges" data-ref="edges"></div>
+			</div>
+		</template>
+
+		<template id="tpl-instance-row">
+			<li>
+				<button type="button" data-on="click:selectInstance">
+					<span class="row1">
+						<span class="badge" data-ref="state"></span>
+						<b data-ref="title"></b>
+					</span>
+					<span class="row2" data-ref="meta"></span>
+				</button>
+			</li>
+		</template>
+
+		<template id="tpl-history-row">
+			<tr>
+				<td class="mono" data-ref="at"></td>
+				<td><span class="ev" data-ref="event"></span></td>
+				<td class="mono" data-ref="nodes"></td>
+				<td class="mono wrap" data-ref="data"></td>
+			</tr>
+		</template>
+
+		<template id="tpl-inbox-row">
+			<tr>
+				<td class="mono" data-ref="at"></td>
+				<td class="mono wrap" data-ref="token"></td>
+				<td class="mono wrap" data-ref="payload"></td>
+				<td data-ref="processed"></td>
+			</tr>
+		</template>
+
+		<script type="module" src="./dist/bundle.js"></script>
+	</body>
+</html>

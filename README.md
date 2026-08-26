@@ -163,6 +163,10 @@ await cron.stop();
 await jobs.stop();
 ```
 
+There is a clickable version of all of this in [`example/`](./example): the same wiring,
+a graph you can watch an instance walk, and a button for each way it can go wrong. See
+[The interactive example](#the-interactive-example).
+
 ## How It Works
 
 ```
@@ -292,6 +296,26 @@ The supported shape today is one runtime per database, serving whichever tenants
 
   Fresh installs need no action. `@marianmeres/steve` 3.x self-heals its own
   schema on init, so it needs nothing either.
+
+## The interactive example
+
+A control panel for one workflow instance: create it, approve it, reject it, let its timer
+run out, hand it a signal its matcher declines, break the effect that books it, cancel it,
+retry it — and watch the graph, the history and the inbox as each of those lands.
+
+```sh
+createdb example_workflow    # or point EXAMPLE_PG_* at a database you already have
+deno task example            # → http://127.0.0.1:8000
+```
+
+The highlighted node is the cursor; the badge on it is the execution state. The countdown
+is `wake_at`. The tick panel switches the scheduler and correlator to manual, so you can
+watch the poke model one press at a time — and since every field on the page was read back
+out of PostgreSQL, stopping the server mid-wait and starting it again changes nothing.
+
+See [`example/`](./example) — the workflow itself (definition, handlers, matcher) is
+[`example/workflow.ts`](./example/workflow.ts), which is the shortest complete answer to
+"what does userland actually write?".
 
 ## API
 

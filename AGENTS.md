@@ -4,7 +4,9 @@
 
 - **Stack**: Deno/Node.js, PostgreSQL, TypeScript
 - **Test**: `deno task test` (requires `TEST_PG_*` env; see [tests/_pg.ts](./tests/_pg.ts))
+- **Check**: `deno task check` — `deno fmt --check && deno lint && deno check` over `src/`, `tests/` and the example's server-side files
 - **Build (npm)**: `deno task npm:build`
+- **Example app**: `deno task example` (needs `EXAMPLE_PG_*`); `deno task example:build` after touching `example/src/`, because `example/dist/bundle.js` is committed. See [example/README.md](./example/README.md).
 - **Entry point**: [src/mod.ts](./src/mod.ts)
 
 ## Package Overview
@@ -74,6 +76,15 @@ tests/
 ├── migrations.test.ts          # schema rename/fence up/down + legacy payload drain
 ├── stock_replenishment.test.ts # happy/timeout/fail paths + validator
 └── weekly_digest.test.ts       # recurring trigger via cron
+example/                    # the interactive app — consumer code, imports by package name
+├── workflow.ts             # userland: one definition + handlers + matcher
+├── server.ts               # runtime wiring + HTTP API (raw SQL for the listing views)
+├── src/main.ts             # the page (@marianmeres/vanilla); bundled to dist/bundle.js
+├── index.html              # shell, styles, <template>s
+└── theme.css, reboot.css   # generated / vendored; excluded from fmt
+scripts/
+├── build-npm.ts
+└── gen-example-{version,theme}.ts  # generated example assets; run by the example tasks
 ```
 
 ## Conceptual Model — Three Layers
@@ -261,6 +272,8 @@ Rule: one `Jobs` and one `Cron` per process, and every process that _starts_ the
 - [ ] Run `deno task test` (set `TEST_PG_*` env first; see `.env` example)
 - [ ] If adding a new history event type, add it to `HISTORY_EVENT` in [src/types.ts](./src/types.ts) and emit it consistently
 - [ ] If changing schema, write a new migration in [src/migrations/](./src/migrations/) — never edit `1_0_0.ts` in place
+- [ ] Changed the public API? Check [example/](./example) still compiles (`deno task check`) and still tells the truth — it is the one consumer in the repo
+- [ ] Touched `example/src/`? Run `deno task example:build` — `example/dist/bundle.js` is committed
 
 ## Dependency Versions
 
@@ -288,6 +301,29 @@ Rule: one `Jobs` and one `Cron` per process, and every process that _starts_ the
 | Crash between `create()`'s commit and steve's job insert                                        | The instance sits in `pending` with no job. The scheduler's second scan re-pokes it after `stalePendingSec` (default 300s; `0` disables).                                                                                                                                                                                                                                                                                                                                                 |
 | Duplicate advance / effect job                                                                  | Fenced out by `seq`: debug-logged no-op, no history row. Duplicates are routine (every tick re-pokes what still looks due), so they are not events.                                                                                                                                                                                                                                                                                                                                       |
 | Second `Jobs` / `Cron` without the workflow handlers                                            | Silent loss — see [Runtime Ownership](#runtime-ownership).                                                                                                                                                                                                                                                                                                                                                                                                                                |
+
+## The Example App
+
+[example/](./example) is consumer code, not a test: it imports `@marianmeres/workflow` by
+package name (mapped to `./src/mod.ts` in `deno.json`) and wires the runtime exactly the
+way the README does. It is also the fastest way to see the two orthogonal states, the
+timer and the poke model behave, so keep it working.
+
+Three things in it deviate from production defaults, all commented where they are set:
+
+| Deviation                                                             | Why                                                                                                                        |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `scheduler.tickOnce()` / `correlator.tickOnce()` on a 500 ms interval | a cron expression cannot go below a minute. The real cron ticks stay registered; the UI can switch the fast loop off.      |
+| `effectMaxAttempts: 1`                                                | so a throwing handler becomes a `failed` instance immediately, with a Retry button. The default 3 would heal it invisibly. |
+| `stalePendingSec: 30` (default 300)                                   | so the stranded-`pending` re-poke is witnessable.                                                                          |
+
+It also does two things the package deliberately does not offer, and both are marked as
+such: **listing instances and inbox rows with raw SQL** (the package exposes `find(id)` /
+`getHistory(id)` — anything that lists is an admin surface, i.e. your query), and nothing
+else. If you add a listing helper to `src/`, the example is where it should be used first.
+
+Touching `example/src/` means re-running `deno task example:build`; the bundle is
+committed so the app runs with no build step.
 
 ## Testing
 
