@@ -15,7 +15,7 @@ A fresh conversation should read this file first, then the relevant `NN-*.md` se
 ## First sprint (durability + signal delivery, before first production use)
 
 Branch: `analysis/first-sprint`
-Options: --max-tasks 5 --budget 40 --model claude-opus-5 --effort xhigh
+Options: --max-tasks 20 --budget 40 --model claude-opus-5 --effort xhigh
 Verify: deno task test
 Verify: deno check src/mod.ts tests/*.ts
 
