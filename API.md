@@ -85,12 +85,12 @@ Note that jobs only ever reach `expired` if something reaps them: run the `Jobs`
 
 Creates a new workflow instance, appends a `created` history entry, and enqueues the first `workflow.advance` job.
 
-| Field               | Type                         | Description                                                                                                                                          |
-| ------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `definitionId`      | `string`                     | Must be registered.                                                                                                                                  |
-| `definitionVersion` | `string`                     | Must be registered.                                                                                                                                  |
-| `context`           | `WorkflowContext` (optional) | Initial context. Default: `{}`.                                                                                                                      |
-| `correlationToken`  | `string \| null` (optional)  | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing). |
+| Field               | Type                         | Description                                                                                                                                                 |
+| ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `definitionId`      | `string`                     | Must be registered.                                                                                                                                         |
+| `definitionVersion` | `string`                     | Must be registered.                                                                                                                                         |
+| `context`           | `WorkflowContext` (optional) | Shallow-merged over the definition's `fsm.context` defaults (top-level keys replace). Default: the defaults alone, or `{}` if the definition declares none. |
+| `correlationToken`  | `string \| null` (optional)  | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing).        |
 
 ##### `find(id: string): Promise<WorkflowInstanceRow | null>`
 

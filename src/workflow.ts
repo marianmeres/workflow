@@ -260,6 +260,8 @@ export class Workflow implements JobEnqueuer {
 	/**
 	 * Creates a new workflow instance and enqueues its first advance.
 	 *
+	 * @param input.context - shallow-merged over the definition's own
+	 *   `fsm.context` defaults (top-level keys replace, they do not deep-merge).
 	 * @param input.correlationToken - optional, set up-front for signal-suspending
 	 *   nodes that need to be matchable from the moment the instance is born
 	 *   (e.g., outbound emails using UUID subaddressing).
@@ -274,6 +276,12 @@ export class Workflow implements JobEnqueuer {
 			input.definitionId,
 			input.definitionVersion,
 		);
+		// The driver always resumes via `FSM.fromSnapshot`, which takes the
+		// persisted context verbatim — so the definition's `context` defaults are
+		// only ever applied here. Same value/factory handling as fsm's own init.
+		const defaults = typeof def.fsm.context === "function"
+			? def.fsm.context()
+			: structuredClone(def.fsm.context ?? {});
 		// One transaction: a throwing enqueue rolls the instance back rather than
 		// leaving a row nothing will ever advance. Steve inserts on its own
 		// connection, so the job can be claimed before this commits — the advance
@@ -284,7 +292,7 @@ export class Workflow implements JobEnqueuer {
 				definition_id: input.definitionId,
 				definition_version: input.definitionVersion,
 				cursor: def.fsm.initial,
-				context: input.context ?? {},
+				context: { ...defaults, ...input.context },
 				correlation_token: input.correlationToken ?? null,
 			});
 			await appendHistory(client, {
