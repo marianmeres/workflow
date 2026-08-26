@@ -28,6 +28,14 @@ import {
 	type WorkflowInstanceRow,
 } from "./types.ts";
 
+/**
+ * Steve's `setHandler` is last-writer-wins, so a second `Workflow` on the same
+ * `Jobs` would silently route every `workflow.advance` through its own registry
+ * and fail the first one's instances with "Unknown workflow definition". The
+ * constructor refuses that; {@link Workflow.detach} releases the claim.
+ */
+const attachedWorkflows = new WeakMap<Jobs, Workflow>();
+
 /** Options accepted by {@link Workflow}. */
 export interface WorkflowOptions {
 	/** PostgreSQL pool. Used for direct SQL (persistence helpers, transactions). */
@@ -102,7 +110,16 @@ export class Workflow implements JobEnqueuer {
 	readonly #advanceMaxAttempts: number;
 	readonly #redispatchLimit: number;
 
+	readonly #jobTypes: string[] = [];
+	readonly #unsubscribers: ReturnType<Jobs["onDone"]>[] = [];
+
 	constructor(options: WorkflowOptions) {
+		if (attachedWorkflows.has(options.jobs)) {
+			throw new Error(
+				"Workflow: a Workflow is already attached to this Jobs instance. " +
+					"Call detach() on it first, or pass a separate Jobs instance.",
+			);
+		}
 		this.db = options.db;
 		this.jobs = options.jobs;
 		this.tenantId = options.tenantId ?? DEFAULT_TENANT_ID;
@@ -117,6 +134,7 @@ export class Workflow implements JobEnqueuer {
 		this.#redispatchLimit = options.redispatchLimit ?? 3;
 
 		// Register the advance handler.
+		this.#jobTypes.push(JOB_TYPE_ADVANCE);
 		this.jobs.setHandler(
 			JOB_TYPE_ADVANCE,
 			async (job: Job, _signal?: AbortSignal) => {
@@ -133,6 +151,7 @@ export class Workflow implements JobEnqueuer {
 		// Register one job-type handler per registered effect handler.
 		const handlerNames = this.registry.handlerNames();
 		for (const name of handlerNames) {
+			this.#jobTypes.push(effectJobType(name));
 			this.jobs.setHandler(
 				effectJobType(name),
 				async (job: Job, signal?: AbortSignal) => {
@@ -152,7 +171,7 @@ export class Workflow implements JobEnqueuer {
 		// `expired` means the worker died mid-run and steve will not retry it, so
 		// the two get different treatment: give up vs. re-dispatch.
 		for (const name of handlerNames) {
-			this.jobs.onDone(effectJobType(name), (job: Job) => {
+			const unsub = this.jobs.onDone(effectJobType(name), (job: Job) => {
 				const payload = job.payload as EffectJobPayload;
 				if (job.status === JOB_STATUS.EXPIRED) {
 					this.#redispatchEffect(job, payload).catch(
@@ -164,9 +183,10 @@ export class Workflow implements JobEnqueuer {
 					);
 				}
 			});
+			this.#unsubscribers.push(unsub);
 		}
 
-		this.jobs.onDone(JOB_TYPE_ADVANCE, (job: Job) => {
+		const unsubAdvance = this.jobs.onDone(JOB_TYPE_ADVANCE, (job: Job) => {
 			const payload = job.payload as AdvanceJobPayload;
 			if (job.status === JOB_STATUS.EXPIRED) {
 				this.#redispatchAdvance(job, payload).catch(
@@ -178,6 +198,29 @@ export class Workflow implements JobEnqueuer {
 				);
 			}
 		});
+		this.#unsubscribers.push(unsubAdvance);
+
+		attachedWorkflows.set(this.jobs, this);
+	}
+
+	/**
+	 * Removes everything the constructor registered on the `Jobs` instance — the
+	 * `workflow.advance` and `workflow.effect.<name>` handlers plus the `onDone`
+	 * subscriptions — and releases the one-Workflow-per-Jobs claim, so a
+	 * replacement can be constructed on the same queue (tests, hot reload).
+	 *
+	 * Detaching does not stop the queue and does not touch running instances:
+	 * jobs enqueued for this `Workflow` stay in the table and fall back to
+	 * steve's noop handler until something re-attaches.
+	 *
+	 * A no-op when this instance is not the attached one (already detached, or
+	 * superseded by a later `Workflow`).
+	 */
+	detach(): void {
+		if (attachedWorkflows.get(this.jobs) !== this) return;
+		for (const type of this.#jobTypes) this.jobs.setHandler(type, null);
+		for (const unsub of this.#unsubscribers) unsub();
+		attachedWorkflows.delete(this.jobs);
 	}
 
 	/** `redispatch` value for the next dispatch, or `null` if the budget is spent. */

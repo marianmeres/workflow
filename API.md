@@ -61,6 +61,8 @@ new Workflow(options: WorkflowOptions)
 
 Throws on construction if any definition references a handler/matcher not present in the maps, or if any other structural problem is found (unknown transition target, missing terminal state, etc.). See [`validateDefinition`](#validatedefinitiondef-available).
 
+**One `Workflow` per `Jobs`.** Steve's `setHandler` is last-writer-wins, so a second `Workflow` on the same `Jobs` would take over `workflow.advance` and fail the first one's instances with "Unknown workflow definition". Constructing it throws instead; call [`detach()`](#detach-void) on the incumbent first, or give the second one its own `Jobs`.
+
 The constructor also subscribes (`jobs.onDone`) to the terminal outcomes of `workflow.advance` and of each `workflow.effect.<name>` type:
 
 - **`failed`** (steve exhausted the attempts) — the instance is marked `failed`, with `effect_failed` history for an effect job and `failed` history carrying the last attempt's error message for an advance.
@@ -105,6 +107,12 @@ Appends an external signal to `__workflow_inbox`. The correlator's next tick mat
 | `source`           | `string`                  | Free-form classifier, e.g. `"email"`, `"webhook"`.             |
 | `correlationToken` | `string`                  | Index key into waiting instances.                              |
 | `payload`          | `Record<string, unknown>` | Signal data, surfaced to the matcher and forwarded to the FSM. |
+
+##### `detach(): void`
+
+Removes everything the constructor registered on the `Jobs` instance — the `workflow.advance` and `workflow.effect.<name>` handlers plus the `onDone` subscriptions — and releases the one-Workflow-per-`Jobs` claim, so a replacement can be constructed on the same queue (tests, hot reload).
+
+It does not stop the queue and does not touch running instances: jobs already enqueued stay in the table and fall back to steve's noop handler until something re-attaches. A no-op when this instance is not the attached one (already detached, or superseded).
 
 ##### `enqueueAdvance` / `enqueueEffect`
 
