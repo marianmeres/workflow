@@ -1,4 +1,4 @@
-import type { FSMConfig, FSMSnapshot } from "@marianmeres/fsm";
+import type { FSMConfig, FSMSnapshot, FSMStatesConfigValue } from "@marianmeres/fsm";
 
 /**
  * Default tenant id used when none is supplied. Mirrors the convention from
@@ -32,6 +32,29 @@ export type NodeMeta =
 export type WorkflowContext = Record<string, unknown>;
 
 /**
+ * An fsm state config narrowed for workflow use: `meta` is a required
+ * {@link NodeMeta} instead of fsm's `unknown`, so a misspelled `kind` or a
+ * missing `handler` is an editor error rather than a construction-time throw.
+ */
+export type WorkflowStateConfig<
+	TState extends string = string,
+	TEvent extends string = string,
+> =
+	& FSMStatesConfigValue<TState, TEvent, WorkflowContext>
+	& { meta: NodeMeta };
+
+/**
+ * An fsm config whose states are {@link WorkflowStateConfig}s. Narrowing only —
+ * still assignable to `FSMConfig`, so `FSM.fromSnapshot(def.fsm, …)` accepts it.
+ */
+export type WorkflowFSMConfig<
+	TState extends string = string,
+	TEvent extends string = string,
+> =
+	& Omit<FSMConfig<TState, TEvent, WorkflowContext>, "states">
+	& { states: Record<TState, WorkflowStateConfig<TState, TEvent>> };
+
+/**
  * A workflow definition: pure, JSON-serializable data. The fsm config carries
  * per-state {@link NodeMeta} on its `meta` field; the driver dispatches on
  * `meta.kind`. Outcome labels are fsm events.
@@ -42,13 +65,30 @@ export interface WorkflowDefinition<
 > {
 	id: string;
 	version: string;
-	fsm: FSMConfig<TState, TEvent, WorkflowContext>;
+	fsm: WorkflowFSMConfig<TState, TEvent>;
 }
 
 /** Result returned by an effectful node's handler. */
 export interface HandlerResult {
 	outcome: string;
 	data?: Record<string, unknown>;
+	/**
+	 * Correlation token to put on the instance row, written at the settle point
+	 * this result leads to — so a wait point can key on something that only
+	 * exists once the effect has run (an SMTP `Message-ID`, a payment-provider
+	 * session id). `null` clears the token; omitting the field leaves whatever
+	 * `create({ correlationToken })` set.
+	 */
+	correlationToken?: string | null;
+	/**
+	 * Shallow patch for the instance context, applied before the outcome
+	 * transition — so guards and actions on the outcome edge already see it, and
+	 * it is persisted at the settle point. Top-level keys replace.
+	 *
+	 * Opt-in on purpose: `data` alone is the fsm payload and never reaches the
+	 * context, so the persisted shape stays a per-handler choice.
+	 */
+	context?: Partial<WorkflowContext>;
 }
 
 /** Arguments passed to an effectful handler. */
@@ -95,6 +135,11 @@ export interface WorkflowInstanceRow {
 	execution_state: ExecutionState;
 	wake_at: Date | null;
 	correlation_token: string | null;
+	/**
+	 * Fencing token. Bumped by every settle-point write; jobs carry the value
+	 * they were issued against, so a stale one is recognized and dropped.
+	 */
+	seq: number;
 	created_at: Date;
 	updated_at: Date;
 }
@@ -124,6 +169,7 @@ export const HISTORY_EVENT = {
 	COMPLETED: "completed",
 	FAILED: "failed",
 	CANCELLED: "cancelled",
+	RETRIED: "retried",
 } as const;
 
 /** Union of all valid {@link HISTORY_EVENT} string values. */
@@ -141,22 +187,88 @@ export interface HistoryRow {
 	data: Record<string, unknown>;
 }
 
+/**
+ * Synthetic event fired by the driver when entering a pure (decision) state,
+ * so the user's guarded transitions can route by inspecting context.
+ *
+ * Pure nodes typically look like:
+ *
+ *     foo: {
+ *       meta: { kind: "pure" },
+ *       on: {
+ *         ENTER: [
+ *           { target: "go_left",  guard: (ctx) => ctx.x > 5 },
+ *           { target: "go_right" },
+ *         ],
+ *       },
+ *     }
+ */
+export const PURE_ENTER_EVENT = "ENTER";
+
+/**
+ * Event fired at a suspending node when a correlated inbox signal is delivered.
+ * A node that does not accept it is not a delivery target at all — the
+ * correlator defers the signal instead of poking (see `WorkflowInboxCorrelator`).
+ */
+export const SIGNAL_MATCHED_EVENT = "MATCHED";
+
+/** Event fired at a suspending node by the scheduler once its `wake_at` is due. */
+export const TIMEOUT_EVENT = "TIMEOUT";
+
 /** Steve job type for "advance this instance one step". */
 export const JOB_TYPE_ADVANCE = "workflow.advance";
 
 /** Steve job-type prefix for effect-handler jobs. Full type is `workflow.effect.<handlerName>`. */
 export const JOB_TYPE_EFFECT_PREFIX = "workflow.effect.";
 
+/** What produced a `workflow.advance` job. Drives the driver's preconditions. */
+export type AdvanceKind = "start" | "effect" | "timeout" | "signal";
+
 /** Payload of a `workflow.advance` job. */
 export interface AdvanceJobPayload {
 	tenant_id: string;
 	instance_id: string;
+	/**
+	 * What produced this advance. Absent on jobs queued before the fence
+	 * existed — the driver then infers it from the payload shape.
+	 */
+	kind?: AdvanceKind;
+	/**
+	 * Fencing token: the instance `seq` this advance was issued against. The
+	 * driver drops the job if the locked row has moved past it. Absent =
+	 * unfenced (a job queued before the fence existed).
+	 */
+	expected_seq?: number;
 	/** Optional outcome label to apply before dispatching. Set when an effect/signal completes. */
 	outcome?: string;
 	/** Optional payload to merge into context via the outcome's `data` field. */
 	outcome_data?: Record<string, unknown>;
-	/** Marks this advance as a TIMEOUT wake-up (so the driver emits a TIMEOUT outcome). */
-	timeout?: boolean;
+	/**
+	 * Inbox row being delivered. `kind: "signal"` only — the driver reads the
+	 * outcome data off the row and marks it processed in the same transaction as
+	 * the transition, so delivery and transition commit together.
+	 */
+	inbox_id?: string;
+	/** Effect handler that produced the outcome. `kind: "effect"` only; for history. */
+	handler?: string;
+	/**
+	 * Correlation token the handler returned ({@link HandlerResult.correlationToken}).
+	 * Written at this advance's settle point; `null` clears the token, absent
+	 * leaves the row's own value alone. `kind: "effect"` only.
+	 */
+	correlation_token?: string | null;
+	/**
+	 * Shallow context patch the handler returned ({@link HandlerResult.context}).
+	 * Merged into the instance context before the outcome is applied.
+	 * `kind: "effect"` only.
+	 */
+	context_patch?: Partial<WorkflowContext>;
+	/**
+	 * How many times this payload has been re-dispatched after its job expired
+	 * (i.e. its worker died mid-run — steve never retries those). Bounded by
+	 * `redispatchLimit`; absent on a first dispatch.
+	 */
+	redispatch?: number;
 	[key: string]: unknown;
 }
 
@@ -165,6 +277,19 @@ export interface EffectJobPayload {
 	tenant_id: string;
 	instance_id: string;
 	handler: string;
+	/**
+	 * Fencing token: the instance `seq` at dispatch time. A handler is not run
+	 * against a row that has moved past it. Absent = unfenced (a job queued
+	 * before the fence existed).
+	 */
+	seq?: number;
+	/** Node that dispatched this effect. Diagnostics only. */
+	cursor?: string;
+	/**
+	 * How many times this payload has been re-dispatched after its job expired.
+	 * See {@link AdvanceJobPayload.redispatch}.
+	 */
+	redispatch?: number;
 	[key: string]: unknown;
 }
 

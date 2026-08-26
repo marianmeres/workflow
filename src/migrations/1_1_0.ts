@@ -9,13 +9,18 @@ interface Ctx {
  * and the target not existing — so it is a no-op on an already-migrated schema.
  * Postgres has no `IF EXISTS` for `RENAME COLUMN`, hence the DO block.
  *
+ * The guard is scoped to `current_schema()` because the `ALTER TABLE` it guards
+ * is unqualified and so resolves through `search_path`: without the predicate a
+ * same-named table in *another* schema decides whether this schema gets renamed.
+ *
  * Index definitions follow a renamed column automatically, and none of this
  * package's index *names* embed the column name, so nothing else to adjust.
  */
 function renameColumn(table: string, from: string, to: string): string {
 	const col = (c: string) =>
 		`EXISTS (SELECT 1 FROM information_schema.columns
-		          WHERE table_name = '${table}' AND column_name = '${c}')`;
+		          WHERE table_schema = current_schema()
+		            AND table_name = '${table}' AND column_name = '${c}')`;
 	return `
 		DO $$
 		BEGIN

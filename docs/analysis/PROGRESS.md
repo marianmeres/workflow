@@ -21,41 +21,100 @@ Verify: deno check src/mod.ts tests/*.ts
 
 | Status | ID  | Deps            | Task                                                                                                                                      | Source                           | Commit |
 | ------ | --- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ |
-| ⬜     | T01 | —               | Fencing token: migration 1.2.0 `seq`; `kind` + `expected_seq` on advances, `seq` on effects; fenced advance/effect/fail; `create()` in tx | [01](./01-durability.md) #1      | —      |
-| ⬜     | T02 | T01             | Correlator: defer early signals, deliver only to `MATCHED`-accepting waits, processed-in-advance, per-tick dedupe, matcher-throw retry    | [02](./02-correlation.md) #1, #2 | —      |
-| ⬜     | T03 | T01 T02         | Scheduler: read-only TIMEOUT pokes + stale-pending re-poke; delete `claimDueWakeUps`; pending partial index                               | [01](./01-durability.md) #2      | —      |
-| ⬜     | T04 | T01             | Observe `workflow.advance` failures; bounded re-dispatch of `expired` advance/effect jobs; `advanceMaxAttempts`, `redispatchLimit`        | [01](./01-durability.md) #3      | —      |
-| ⬜     | T05 | T01 T02 T03 T04 | Docs pass: correct durability claims, document `autoCleanup`, fence/poke model, signal semantics, noop-handler hazards                    | [04](./04-docs-tests-ops.md) #1  | —      |
+| ✅     | T01 | —               | Fencing token: migration 1.2.0 `seq`; `kind` + `expected_seq` on advances, `seq` on effects; fenced advance/effect/fail; `create()` in tx | [01](./01-durability.md) #1      | c7e5b22 |
+| ✅     | T02 | T01             | Correlator: defer early signals, deliver only to `MATCHED`-accepting waits, processed-in-advance, per-tick dedupe, matcher-throw retry    | [02](./02-correlation.md) #1, #2 | 27c0f60 |
+| ✅     | T03 | T01 T02         | Scheduler: read-only TIMEOUT pokes + stale-pending re-poke; delete `claimDueWakeUps`; pending partial index                               | [01](./01-durability.md) #2      | 53a3323 |
+| ✅     | T04 | T01             | Observe `workflow.advance` failures; bounded re-dispatch of `expired` advance/effect jobs; `advanceMaxAttempts`, `redispatchLimit`        | [01](./01-durability.md) #3      | 6de8396 |
+| ✅     | T05 | T01 T02 T03 T04 | Docs pass: correct durability claims, document `autoCleanup`, fence/poke model, signal semantics, noop-handler hazards                    | [04](./04-docs-tests-ops.md) #1  | a7f96c4 |
 
-`Verify:` deliberately omits `deno lint` / `deno fmt --check` — both are red at the
-baseline (T15). Add them once T15 lands.
+`Verify:` deliberately omitted `deno lint` / `deno fmt --check` — both were red at the
+baseline (T15). The second sprint adds them, with T15 as its first row.
 
 Before starting the driver: commit `docs/analysis/` on `master` (the driver refuses a
 dirty tree and only switches to the sprint branch from a default branch), then run
 `sprint docs/analysis` from the repository root. `deno task test` needs the `TEST_PG_*`
 env from `.env`.
 
+## Second sprint (hardening, API surface, release)
+
+Branch: `analysis/first-sprint`
+Options: --max-tasks 12 --budget 90 --task-budget 12 --max-turns 120 --run-deadline 21600 --model claude-opus-5 --effort xhigh
+Verify: deno lint
+Verify: deno fmt --check
+
+| Status | ID  | Deps                                    | Task                                                                                               | Source                           | Commit |
+| ------ | --- | --------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------- | ------ |
+| ✅     | T15 | —                                       | `deno fmt` + `deno lint` clean; `deno task check`; `fmt.exclude` for this tracker                   | [04](./04-docs-tests-ops.md) #4  | 25df0af |
+| ✅     | T13 | —                                       | `tests/driver.test.ts`: pure routing, hop guard, rejections, unknown definition; `tests/_util.ts`   | [04](./04-docs-tests-ops.md) #3  | fb296f5 |
+| ✅     | T12 | —                                       | Migration 1.1.0 guard: `table_schema = current_schema()`                                           | [04](./04-docs-tests-ops.md) #2  | 18362df |
+| ✅     | T06 | —                                       | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)         | [03](./03-definition-and-api.md) #1 | 4a3fc30 |
+| ✅     | T09 | —                                       | `create()` seeds context from `def.fsm.context`, input overlays                                    | [03](./03-definition-and-api.md) #2 | 402d4e7 |
+| ✅     | T10 | —                                       | Guard: one `Workflow` per `Jobs` (WeakMap + throw) and `detach()`                                  | [03](./03-definition-and-api.md) #3 | 29a5bb1 |
+| ✅     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | 1a947a8 |
+| ✅     | T17 | T08                                     | Opt-in `HandlerResult.context` shallow patch before the outcome transition                         | [03](./03-definition-and-api.md) #4 | efce4a7 |
+| ✅     | T07 | T01                                     | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event             | [01](./01-durability.md) #4      | 3bafa6b |
+| ✅     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | 10031bd |
+| 🔒     | T16 | T06 T07 T08 T09 T10 T12 T13 T14 T15 T17 | Release 2.1.0 to JSR + npm (`deno task rpm`); smoke-run the npm build under Node first             | [04](./04-docs-tests-ops.md) #1  | —      |
+
+The whole backlog, promoted in **run order rather than rank order**: T15 first because it makes
+the two new `Verify:` commands green, T13 second because every later test file wants
+`tests/_util.ts` and a driver fixture, T14 last because it retypes what the fixtures written
+before it compile against. The rest keep their relative rank.
+
+`Verify:` accumulates, so the two lines above join the first sprint's `deno task test` and
+`deno check` — **four commands after every task**, T15 included (which is why it runs first).
+
+T16 sits in the sprint table rather than the backlog on purpose: a run that finishes every
+runnable row then exits `2` — "nothing the driver can run, 1 🔒 — yours to do" — instead of `0`,
+so "sprint complete" and "the release is waiting on you" do not look the same
+(`sprint/SPEC.md` §3.3). Flip it to ✅ after publishing and the next run exits `0`.
+
+Run it with `sprint docs/analysis` from the repository root. The declared branch is already
+checked out, so the driver switches nothing. `deno task test` needs the `TEST_PG_*` env from
+`.env`.
+
 ## Backlog (ranked, post-sprint)
 
 | Status | ID  | Rank | Deps | Task                                                                                          | Source                              |
 | ------ | --- | ---- | ---- | --------------------------------------------------------------------------------------------- | ----------------------------------- |
-| ⬜     | T07 | 6    | T01  | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event        | [01](./01-durability.md) #4         |
-| ⬜     | T06 | 7    | —    | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)    | [03](./03-definition-and-api.md) #1 |
-| ⬜     | T09 | 8    | —    | `create()` seeds context from `def.fsm.context`, input overlays                               | [03](./03-definition-and-api.md) #2 |
-| ⬜     | T08 | 9    | T01  | `HandlerResult.correlationToken` applied at the settle-point write                            | [02](./02-correlation.md) #3        |
-| ⬜     | T10 | 10   | —    | Guard: one `Workflow` per `Jobs` (WeakMap + throw) and `detach()`                             | [03](./03-definition-and-api.md) #3 |
-| ⬜     | T12 | 11   | —    | Migration 1.1.0 guard: `table_schema = current_schema()` (and in 1.2.0)                       | [04](./04-docs-tests-ops.md) #2     |
-| ⬜     | T13 | 12   | —    | `tests/driver.test.ts`: pure routing, hop guard, rejections, matcher reject; `tests/_util.ts` | [04](./04-docs-tests-ops.md) #3     |
-| ⏭️     | T11 | 13   | T10  | Tenant-per-call runtime: `tenantId` on `create`/`appendInbox`/`find`, `"*"` ticks             | [03](./03-definition-and-api.md) #3 |
-| ⬜     | T17 | 14   | T08  | Opt-in `HandlerResult.context` shallow patch before the outcome transition                    | [03](./03-definition-and-api.md) #4 |
-| ⬜     | T14 | 15   | —    | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts       | [03](./03-definition-and-api.md) #5 |
-| ⬜     | T15 | 16   | —    | `deno fmt` + `deno lint` clean; `deno task check`                                             | [04](./04-docs-tests-ops.md) #4     |
-| 🔒     | T16 | 17   | T05  | Release 2.1.0 to JSR + npm (`deno task rpm`); smoke-run the npm build under Node first        | [04](./04-docs-tests-ops.md) #1     |
+| ⏭️     | T11 | 13   | T10  | Tenant-per-call runtime: `tenantId` on `create`/`appendInbox`/`find`, `"*"` ticks              | [03](./03-definition-and-api.md) #3 |
 
-T11 is deferred — guard only (T10) for now; the revisit trigger is in the Decisions log.
-T16 is human-only: publishing is irreversible. Everything else is runnable.
+T11 is the only row left here — deferred by decision, guard only (T10) for now; the revisit
+trigger is in the Decisions log. Everything else was promoted into the second sprint above.
 
 ## Decisions log
+
+- **2026-08-26** — Backlog promoted into a second sprint (owner interview):
+  - **Scope:** all ten ⬜ backlog rows into one section, on the same branch
+    `analysis/first-sprint` — no merge to `master` in between. T16 moves into the sprint
+    table as 🔒 so a completed run exits `2` ("the release is yours"), not `0`. T11 stays
+    the only backlog row.
+  - **Run order is not rank order.** T15 first (it makes the two new `Verify:` commands
+    green), T13 second (`tests/_util.ts` and a driver fixture for every later test), T14
+    last (it retypes what earlier fixtures compile against). The rest keep their rank.
+  - **`Verify:` gains `deno lint` and `deno fmt --check`** — approved now that T15 leads.
+    They accumulate onto the first sprint's two commands: four run after every task.
+  - **T15 additionally excludes `docs/analysis/PROGRESS.md` from `deno fmt`.** —
+    _Rationale:_ `setCommitCell` writes a 7-character hash into a `Commit` cell sized for
+    `—` without re-padding the header, so the driver's own end-of-run bookkeeping commit
+    leaves this file failing `deno fmt --check` — it does today, at `253032b`. Without the
+    exclusion the first task of any _later_ run fails a verification that has nothing to do
+    with it. This does **not** reverse the "no `fmt.exclude`" decision for
+    `README`/`API`/`AGENTS`; those are still reflowed.
+  - **T14 ships as specced, under 2.1.0.** `meta` stays required on `WorkflowStateConfig`.
+    Only a definition that already threw in `validateDefinition` loses compilation, so no
+    working consumer breaks and a minor bump is honest.
+  - **T12 covers 1.1.0 only.** The 1.2.0 migration T01 shipped uses
+    `ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` and reads no
+    `information_schema`, so it has no schema-blind guard to fix.
+  - **T13 case (f) is already covered.** `tests/correlator.test.ts` (T02) asserts the
+    `signal_rejected` path. T13 is cases (a)–(e) plus moving `waitUntil` — now duplicated in
+    **five** test files, not the three the source doc counted — into `tests/_util.ts`.
+  - **Ceilings raised from sprint 1's measurements:** the five tasks cost $3.66–$5.85
+    (mean $4.71, $23.43 total) and ran 8–13 min each, and T05 used 75 of its 80 turns. Hence
+    `--budget 90 --task-budget 12 --max-turns 120 --run-deadline 21600`: ten tasks ≈ $47 and
+    ≈ 2 h, with the turn cap no longer one refusal away and the whole-run deadline able to
+    fit the tail.
 
 - **2026-08-26** — Owner interview: every open question closed; the sprint is cleared for
   unattended EXECUTE via the sprint driver.

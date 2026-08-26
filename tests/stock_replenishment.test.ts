@@ -11,26 +11,10 @@ import {
 	WorkflowScheduler,
 } from "../src/mod.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
-import {
-	makeHandlers,
-	stockReplenishmentV1,
-} from "./fixtures/stock-replenishment.ts";
+import { waitUntil } from "./_util.ts";
+import { makeHandlers, stockReplenishmentV1 } from "./fixtures/stock-replenishment.ts";
 
 const PG = pgConfigured();
-
-/** Polls `predicate` every `intervalMs` until truthy or `timeoutMs` elapses. */
-async function waitUntil<T>(
-	predicate: () => Promise<T | null | undefined | false>,
-	{ timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const v = await predicate();
-		if (v) return v as T;
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-	throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-}
 
 /** Sets up a fresh Workflow + Jobs + Cron triple ready for a test. */
 function setupRuntime(input: {
@@ -82,7 +66,9 @@ Deno.test({
 			// and land in await_reply (execution_state = waiting).
 			await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.WAITING ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.WAITING
+					? row
+					: null;
 			});
 
 			const reread = await workflow.find(inst.id);
@@ -101,7 +87,9 @@ Deno.test({
 
 			const finalRow = await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 			assertEquals(finalRow.cursor, "_end_ok");
 
@@ -161,21 +149,24 @@ Deno.test({
 
 			await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.WAITING ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.WAITING
+					? row
+					: null;
 			});
 
-			// Force wake_at into the past so the scheduler's next tick claims it.
+			// Force wake_at into the past so the scheduler's next tick pokes it.
 			await pool.query(
 				`UPDATE __workflow_instances SET wake_at = now() - interval '1 minute' WHERE id = $1`,
 				[inst.id],
 			);
 
-			const claimed = await scheduler.tickOnce();
-			assertEquals(claimed, 1);
+			assertEquals(await scheduler.tickOnce(), { woken: 1, repoked: 0 });
 
 			const finalRow = await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 			assertEquals(finalRow.cursor, "_end_timeout");
 		} finally {
@@ -221,7 +212,7 @@ Deno.test({
 
 Deno.test({
 	name: "validator rejects definitions referencing unregistered handlers",
-	async fn() {
+	fn() {
 		const bad = {
 			id: "bad",
 			version: "1.0.0",

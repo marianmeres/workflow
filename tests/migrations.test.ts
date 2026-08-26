@@ -7,30 +7,29 @@ import {
 	weeklyDigestV1,
 } from "./fixtures/weekly-digest.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
+import { waitUntil } from "./_util.ts";
 import type pg from "pg";
 
 const columns = async (pool: pg.Pool, table: string): Promise<string[]> => {
 	const { rows } = await pool.query<{ column_name: string }>(
-		`SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = current_schema() AND table_name = $1`,
 		[table],
 	);
 	return rows.map((r) => r.column_name);
 };
 
+const indexes = async (pool: pg.Pool, table: string): Promise<string[]> => {
+	const { rows } = await pool.query<{ indexname: string }>(
+		`SELECT indexname FROM pg_indexes WHERE tablename = $1`,
+		[table],
+	);
+	return rows.map((r) => r.indexname);
+};
+
 const TABLES = ["__workflow_instances", "__workflow_inbox", "__workflow_history"];
 
-async function waitUntil<T>(
-	predicate: () => Promise<T | null | undefined | false>,
-	{ timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const v = await predicate();
-		if (v) return v as T;
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-	throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-}
+const STALE_PENDING_IDX = "__workflow_instances_stale_pending_idx";
 
 Deno.test({
 	name: "migration 1.1.0: renames project_id -> tenant_id, preserving data",
@@ -139,6 +138,83 @@ Deno.test({
 				`SELECT project_id FROM __workflow_instances`,
 			);
 			assertEquals(rows[0].project_id, "acme");
+		} finally {
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name: "migration 1.1.0: the rename guard ignores other schemas",
+	ignore: !pgConfigured(),
+	async fn() {
+		// The second schema is the session's own `pg_temp_N` — the only schema a
+		// test role is guaranteed to be able to create a table in. `max: 1` keeps
+		// the temp table and the migration on one connection (temp schemas are
+		// session-local), and the explicit `search_path` puts `pg_temp` *last* so
+		// unqualified DDL still resolves to the current schema.
+		const pool = createPg({ max: 1 });
+		try {
+			await resetSchema(pool);
+			await pool.query(`SET search_path = "$user", public, pg_temp`);
+			// Same table name in another schema, already carrying the *target*
+			// column: a guard blind to `table_schema` reads that as "already
+			// migrated" and skips the rename in the schema that needs it.
+			await pool.query(`CREATE TEMP TABLE __workflow_instances (tenant_id text)`);
+
+			await createMigrate(pool).up("1.0.0");
+			assert((await columns(pool, "__workflow_instances")).includes("project_id"));
+
+			await createMigrate(pool).up("latest");
+			const cols = await columns(pool, "__workflow_instances");
+			assert(cols.includes("tenant_id"), "the current schema must be renamed");
+			assert(!cols.includes("project_id"));
+		} finally {
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name:
+		"migration 1.2.0: adds the seq fence + stale-pending index, reversible via down('1.1.0')",
+	ignore: !pgConfigured(),
+	async fn() {
+		const pool = createPg();
+		try {
+			await resetSchema(pool);
+
+			await createMigrate(pool).up("1.1.0");
+			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				!(await indexes(pool, "__workflow_instances")).includes(
+					STALE_PENDING_IDX,
+				),
+			);
+
+			await createMigrate(pool).up("latest");
+			assert((await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+			);
+
+			// Pre-existing rows migrate in at the fence's zero point.
+			const { rows } = await pool.query<{ seq: number }>(
+				`INSERT INTO __workflow_instances
+					(tenant_id, definition_id, definition_version, cursor, execution_state)
+				 VALUES ('acme', 'def', '1.0.0', 'start', 'pending')
+				 RETURNING seq`,
+			);
+			assertEquals(rows[0].seq, 0);
+
+			await createMigrate(pool).down("1.1.0");
+			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+			assert(
+				!(await indexes(pool, "__workflow_instances")).includes(
+					STALE_PENDING_IDX,
+				),
+			);
+			assert((await columns(pool, "__workflow_instances")).includes("tenant_id"));
 		} finally {
 			await pool.end();
 		}

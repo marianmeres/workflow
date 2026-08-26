@@ -3,7 +3,8 @@ import type { HistoryEventType, HistoryRow } from "../types.ts";
 
 type Executor = pg.Pool | pg.PoolClient | pg.Client;
 
-const SELECT_COLUMNS = `id, tenant_id, instance_id, at, event_type, from_node, to_node, data`;
+const SELECT_COLUMNS =
+	`id, tenant_id, instance_id, at, event_type, from_node, to_node, data`;
 
 /**
  * Appends a single audit row to `__workflow_history`. Accepts a pool, a

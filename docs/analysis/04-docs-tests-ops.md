@@ -183,5 +183,9 @@ Planning artifact; no code was changed.
 ## Open questions / decisions needed
 
 Resolved 2026-08-26 (see `PROGRESS.md` → Decisions log): **#4** — let `deno fmt` reflow
-the markdown tables (`README.md`, `API.md`, `AGENTS.md`); no `fmt.exclude` (T15 approved).
+the markdown tables (`README.md`, `API.md`, `AGENTS.md`); no `fmt.exclude` for them (T15
+approved). Amended when the backlog was promoted: `fmt.exclude` gains
+`docs/analysis/PROGRESS.md` alone, because the sprint driver's own bookkeeping commit
+rewrites a `Commit` cell without re-padding the table and would otherwise leave
+`deno fmt --check` — now a `Verify:` command — red through no task's fault.
 **#1** has no open question, but it must wait for T01–T04 so it documents shipped behavior.

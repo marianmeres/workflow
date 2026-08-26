@@ -1,4 +1,13 @@
-import type { NodeMeta, WorkflowDefinition } from "./types.ts";
+import {
+	type NodeMeta,
+	PURE_ENTER_EVENT,
+	SIGNAL_MATCHED_EVENT,
+	TIMEOUT_EVENT,
+	type WorkflowDefinition,
+} from "./types.ts";
+
+/** fsm's catch-all event key: matched when the specific event has no edge. */
+const WILDCARD_EVENT = "*";
 
 /**
  * Validates a workflow definition against a set of registered handler/matcher
@@ -12,6 +21,10 @@ import type { NodeMeta, WorkflowDefinition } from "./types.ts";
  * - every `suspending` state's matcher (if present) is in `availableMatchers`
  * - every transition target string resolves to a defined state
  * - at least one terminal state exists
+ * - every node has an edge for the events it will actually receive: `ENTER` at a
+ *   pure node, `TIMEOUT` where there is a `timeoutSec`, `MATCHED` where there is
+ *   a matcher; an effectful node has at least one outcome edge, a suspending one
+ *   has some way to wake, and a terminal one has none
  */
 export function validateDefinition(
 	def: WorkflowDefinition,
@@ -51,15 +64,35 @@ export function validateDefinition(
 	let terminalCount = 0;
 
 	for (const [stateName, stateCfg] of Object.entries(def.fsm.states)) {
-		const meta = stateCfg.meta as NodeMeta | undefined;
+		// Typed as required by `WorkflowStateConfig`, but a JS caller can still
+		// hand us anything, so the runtime shape is checked all the same.
+		const meta: NodeMeta | undefined = stateCfg.meta;
 		if (!meta || typeof meta !== "object") {
 			throw new Error(
 				`Workflow definition "${def.id}@${def.version}": state "${stateName}" is missing meta`,
 			);
 		}
 		const kind = (meta as { kind?: string }).kind;
+
+		// The events this node will actually be sent are decided by its kind, and
+		// an fsm that rejects one fails the instance — after any side effect at
+		// this node has already run. So the edges are checked here, not at runtime.
+		const on = stateCfg.on as
+			| Record<string, string | { target?: string } | Array<{ target?: string }>>
+			| undefined;
+		const events = new Set(Object.keys(on ?? {}));
+		const hasWildcard = events.has(WILDCARD_EVENT);
+		const accepts = (event: string) => events.has(event) || hasWildcard;
+
 		switch (kind) {
 			case "pure":
+				if (!accepts(PURE_ENTER_EVENT)) {
+					throw new Error(
+						`Workflow definition "${def.id}@${def.version}": ` +
+							`pure state "${stateName}" has no "${PURE_ENTER_EVENT}" ` +
+							`(or "${WILDCARD_EVENT}") transition and could only fail on entry`,
+					);
+				}
 				break;
 			case "effectful": {
 				const h = (meta as { handler?: string }).handler;
@@ -73,6 +106,13 @@ export function validateDefinition(
 					throw new Error(
 						`Workflow definition "${def.id}@${def.version}": ` +
 							`state "${stateName}" references unregistered handler "${h}"`,
+					);
+				}
+				if (events.size === 0) {
+					throw new Error(
+						`Workflow definition "${def.id}@${def.version}": ` +
+							`effectful state "${stateName}" has no transitions, ` +
+							`so every outcome of "${h}" would be rejected`,
 					);
 				}
 				break;
@@ -92,10 +132,47 @@ export function validateDefinition(
 								`state "${stateName}" references unregistered matcher "${m}"`,
 						);
 					}
+					if (!accepts(SIGNAL_MATCHED_EVENT)) {
+						throw new Error(
+							`Workflow definition "${def.id}@${def.version}": ` +
+								`suspending state "${stateName}" has a matcher but no ` +
+								`"${SIGNAL_MATCHED_EVENT}" (or "${WILDCARD_EVENT}") transition`,
+						);
+					}
+				}
+				const t = (meta as { timeoutSec?: number }).timeoutSec;
+				if (t !== undefined) {
+					if (typeof t !== "number" || !Number.isFinite(t) || t <= 0) {
+						throw new Error(
+							`Workflow definition "${def.id}@${def.version}": ` +
+								`suspending state "${stateName}" timeoutSec must be a finite ` +
+								`number greater than 0, got ${JSON.stringify(t)}`,
+						);
+					}
+					if (!accepts(TIMEOUT_EVENT)) {
+						throw new Error(
+							`Workflow definition "${def.id}@${def.version}": ` +
+								`suspending state "${stateName}" has a timeoutSec but no ` +
+								`"${TIMEOUT_EVENT}" (or "${WILDCARD_EVENT}") transition`,
+						);
+					}
+				} else if (!accepts(SIGNAL_MATCHED_EVENT)) {
+					throw new Error(
+						`Workflow definition "${def.id}@${def.version}": ` +
+							`suspending state "${stateName}" can never wake: ` +
+							`no timeoutSec and no "${SIGNAL_MATCHED_EVENT}" ` +
+							`(or "${WILDCARD_EVENT}") transition`,
+					);
 				}
 				break;
 			}
 			case "terminal":
+				if (events.size > 0) {
+					throw new Error(
+						`Workflow definition "${def.id}@${def.version}": ` +
+							`terminal state "${stateName}" must have no transitions`,
+					);
+				}
 				terminalCount++;
 				break;
 			default:
@@ -106,9 +183,6 @@ export function validateDefinition(
 		}
 
 		// transition target validation
-		const on = stateCfg.on as
-			| Record<string, string | { target?: string } | Array<{ target?: string }>>
-			| undefined;
 		for (const [eventName, transition] of Object.entries(on ?? {})) {
 			const targets: Array<string | undefined> = [];
 			if (typeof transition === "string") {

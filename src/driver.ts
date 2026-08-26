@@ -2,20 +2,22 @@ import { FSM } from "@marianmeres/fsm";
 import type pg from "pg";
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
-import {
-	lockInstance,
-	updateInstance,
-} from "./persistence/instances.ts";
+import { lockInboxRow, markProcessed } from "./persistence/inbox.ts";
+import { lockInstance, updateInstance } from "./persistence/instances.ts";
 import { withTransaction } from "./persistence/tx.ts";
 import type { WorkflowRegistry } from "./registry.ts";
 import {
 	type AdvanceJobPayload,
+	type AdvanceKind,
 	type EffectJobPayload,
 	EXECUTION_STATE,
 	HISTORY_EVENT,
+	type InboxRow,
 	JOB_TYPE_ADVANCE,
 	JOB_TYPE_EFFECT_PREFIX,
 	type NodeMeta,
+	PURE_ENTER_EVENT,
+	SIGNAL_MATCHED_EVENT,
 	type WorkflowContext,
 	type WorkflowInstanceRow,
 } from "./types.ts";
@@ -38,22 +40,18 @@ function payloadTenantId(
 }
 
 /**
- * Synthetic event fired by the driver when entering a pure (decision) state,
- * so the user's guarded transitions can route by inspecting context.
+ * What produced this advance. Jobs queued before the fence existed carry no
+ * `kind`, so it is inferred from the legacy payload shape: `timeout: true` was
+ * the scheduler, an `outcome` without it was an effect completion or a matched
+ * signal, and neither was the initial dispatch.
  *
- * Pure nodes typically look like:
- *
- *     foo: {
- *       meta: { kind: "pure" },
- *       on: {
- *         ENTER: [
- *           { target: "go_left",  guard: (ctx) => ctx.x > 5 },
- *           { target: "go_right" },
- *         ],
- *       },
- *     }
+ * Same transitional status as {@link payloadTenantId} — delete both together.
  */
-export const PURE_ENTER_EVENT = "ENTER";
+function advanceKind(payload: AdvanceJobPayload): AdvanceKind {
+	if (payload.kind) return payload.kind;
+	if (payload.timeout === true) return "timeout";
+	return payload.outcome !== undefined ? "effect" : "start";
+}
 
 /**
  * Function the driver uses to enqueue follow-up steve jobs. Supplied by the
@@ -84,6 +82,11 @@ const MAX_PURE_HOPS = 64;
  * Wrapped in a single PG transaction:
  * 1. Lock the instance row.
  * 2. If in a terminal execution_state, no-op.
+ * 2b. If the payload's fence (`expected_seq`) does not match the locked row, or
+ *    the row is not in the state this `kind` of advance expects, no-op — the job
+ *    is a duplicate, or a zombie from a step the instance already left.
+ * 2c. `kind: "signal"` → lock the inbox row; it supplies the outcome data and is
+ *    marked processed in this same transaction.
  * 3. If `outcome` was supplied, apply it via fsm.transition(outcome, data).
  *    - Reject → mark failed, append history.
  * 4. Loop on the current state's meta.kind:
@@ -98,14 +101,18 @@ export async function runAdvance(
 	enqueuer: JobEnqueuer,
 	payload: AdvanceJobPayload,
 ): Promise<void> {
-	const { instance_id, outcome, outcome_data, timeout } = payload;
+	const { instance_id } = payload;
 	const tenant_id = payloadTenantId(payload);
+	const kind = advanceKind(payload);
 
 	await withTransaction(pool, async (client) => {
 		const row = await lockInstance(client, instance_id);
 		if (!row) {
-			clog.warn?.(`advance: instance ${instance_id} not found`);
-			return;
+			// Also the window where the creating transaction has not committed yet
+			// (steve's job insert is autocommit on its own connection, so the job
+			// can be claimed first). Throw rather than drop the only job the
+			// instance will ever get — steve retries.
+			throw new Error(`advance: instance ${instance_id} not found`);
 		}
 
 		if (
@@ -119,6 +126,65 @@ export async function runAdvance(
 			return;
 		}
 
+		// The fence. Only meaningful against the locked row, hence its position.
+		// A mismatch means the instance has settled at least once since this job
+		// was issued: the job is a duplicate or a zombie. Debug-log it and drop
+		// it — with re-poking ticks these are routine, not events, so no history.
+		if (payload.expected_seq !== undefined && row.seq !== payload.expected_seq) {
+			clog.debug?.(
+				`advance: stale (row.seq=${row.seq}, expected=${payload.expected_seq}); no-op`,
+			);
+			return;
+		}
+
+		// Per-kind preconditions. Applied only to payloads that state their kind:
+		// on a legacy payload the kind is a guess, and guessing wrong must not
+		// swallow the job. `timeout` re-checks due-ness because the scheduler tick
+		// is read-only: the timer is still live until this advance clears it, and
+		// an advance that applied TIMEOUT to a not-yet-due row would cut the wait
+		// short.
+		if (
+			(payload.kind === "start" &&
+				row.execution_state !== EXECUTION_STATE.PENDING) ||
+			(payload.kind === "effect" &&
+				row.execution_state !== EXECUTION_STATE.RUNNING) ||
+			(payload.kind === "signal" &&
+				row.execution_state !== EXECUTION_STATE.WAITING) ||
+			(payload.kind === "timeout" &&
+				(row.execution_state !== EXECUTION_STATE.WAITING || !row.wake_at ||
+					row.wake_at > new Date()))
+		) {
+			clog.debug?.(
+				`advance: ${payload.kind} precondition not met (${row.execution_state}); no-op`,
+			);
+			return;
+		}
+
+		// A signal advance carries the inbox row id, not its payload: the row is
+		// the source of truth, and marking it processed happens in this very
+		// transaction, so delivery and transition commit together or not at all.
+		let outcome = payload.outcome;
+		let outcome_data = payload.outcome_data;
+		let inbox: InboxRow | null = null;
+		if (payload.kind === "signal" && payload.inbox_id) {
+			inbox = await lockInboxRow(client, payload.inbox_id);
+			if (!inbox || inbox.processed_at) {
+				clog.debug?.(
+					`advance: inbox row ${payload.inbox_id} already delivered; no-op`,
+				);
+				return;
+			}
+			outcome = SIGNAL_MATCHED_EVENT;
+			outcome_data = inbox.payload;
+		}
+
+		// A handler may hand back the token its side effect produced (an SMTP
+		// Message-ID, a provider session id). Written at the settle point below,
+		// so it is on the row the moment the instance becomes signallable.
+		const tokenPatch = payload.correlation_token !== undefined
+			? { correlation_token: payload.correlation_token }
+			: {};
+
 		let def;
 		try {
 			def = registry.requireDefinition(row.definition_id, row.definition_version);
@@ -126,17 +192,23 @@ export async function runAdvance(
 			await failInstance(
 				client,
 				row,
-				`Unknown definition ${row.definition_id}@${row.definition_version}: ${String(e)}`,
+				`Unknown definition ${row.definition_id}@${row.definition_version}: ${
+					String(e)
+				}`,
 			);
 			return;
 		}
 
 		// Construct the FSM at the saved cursor. fromSnapshot skips onEnter
-		// (a resume is not entry) and preserves previous.
+		// (a resume is not entry) and preserves previous. A handler's context
+		// patch goes in here, before the outcome is applied, so guards and
+		// actions on the outcome edge already see it.
 		const positioned = FSM.fromSnapshot(def.fsm, {
 			state: row.cursor,
 			previous: row.previous_cursor,
-			context: row.context,
+			context: payload.context_patch
+				? { ...row.context, ...payload.context_patch }
+				: row.context,
 		});
 
 		// If an outcome was supplied, apply it. This is the wake-up after an effect
@@ -163,18 +235,38 @@ export async function runAdvance(
 				);
 				return;
 			}
-			// Optionally merge outcome_data into context here. Convention: handlers
-			// return `{ outcome, data }` and the data is the payload — fsm action
-			// hooks merge it if the user wires them. We don't auto-merge to keep
-			// state shape under the user's control; the data is available via the
-			// payload arg to actions/guards.
+			// `outcome_data` stays the fsm payload and is never auto-merged: what
+			// lands in the context is either an fsm action hook the user wired, or
+			// what the handler explicitly returned in `HandlerResult.context`
+			// (merged above).
+			if (kind === "effect" && payload.handler) {
+				await appendHistory(client, {
+					tenant_id,
+					instance_id,
+					event_type: HISTORY_EVENT.EFFECT_COMPLETED,
+					from_node: before,
+					data: { handler: payload.handler, outcome },
+				});
+			}
+			if (inbox) {
+				await appendHistory(client, {
+					tenant_id,
+					instance_id,
+					event_type: HISTORY_EVENT.SIGNAL_RECEIVED,
+					from_node: before,
+					data: { inbox_id: inbox.id, source: inbox.source },
+				});
+				await markProcessed(client, inbox.id);
+			}
 			await appendHistory(client, {
 				tenant_id,
 				instance_id,
-				event_type: timeout ? HISTORY_EVENT.TIMEOUT : HISTORY_EVENT.TRANSITION,
+				event_type: kind === "timeout"
+					? HISTORY_EVENT.TIMEOUT
+					: HISTORY_EVENT.TRANSITION,
 				from_node: before,
 				to_node: positioned.state,
-				data: { outcome, outcome_data },
+				data: { outcome, outcome_data, ...tokenPatch },
 			});
 		}
 
@@ -199,7 +291,7 @@ export async function runAdvance(
 						execution_state: EXECUTION_STATE.COMPLETED,
 						wake_at: null,
 						correlation_token: null,
-					});
+					}, { bumpSeq: true });
 					await appendHistory(client, {
 						tenant_id,
 						instance_id,
@@ -210,17 +302,20 @@ export async function runAdvance(
 				}
 				case "effectful": {
 					// Persist context (any guards/actions may have updated it) + flip to running.
-					await updateInstance(client, instance_id, {
+					const settled = await updateInstance(client, instance_id, {
 						cursor: positioned.state,
 						previous_cursor: positioned.previous,
 						context: positioned.context as WorkflowContext,
 						execution_state: EXECUTION_STATE.RUNNING,
 						wake_at: null,
-					});
+						...tokenPatch,
+					}, { bumpSeq: true });
 					await enqueuer.enqueueEffect(client, meta.handler, {
 						tenant_id,
 						instance_id,
 						handler: meta.handler,
+						seq: settled.seq,
+						cursor: settled.cursor,
 					});
 					await appendHistory(client, {
 						tenant_id,
@@ -235,15 +330,28 @@ export async function runAdvance(
 					const wake_at = meta.timeoutSec
 						? new Date(Date.now() + meta.timeoutSec * 1000)
 						: null;
-					// correlation_token already on the row (set at create-time or by the user
-					// via context). We don't auto-generate one here.
-					await updateInstance(client, instance_id, {
+					// The token is whatever create() set or the handler returned — the
+					// driver never generates one.
+					const settled = await updateInstance(client, instance_id, {
 						cursor: positioned.state,
 						previous_cursor: positioned.previous,
 						context: positioned.context as WorkflowContext,
 						execution_state: EXECUTION_STATE.WAITING,
 						wake_at,
-					});
+						...tokenPatch,
+					}, { bumpSeq: true });
+					// Nothing can deliver a signal to a tokenless wait, and the
+					// validator cannot catch it — tokens exist only at runtime.
+					const on = def.fsm.states[positioned.state].on;
+					if (
+						!settled.correlation_token &&
+						(SIGNAL_MATCHED_EVENT in on || "*" in on)
+					) {
+						clog.warn?.(
+							`advance: instance ${instance_id} waits at "${positioned.state}" ` +
+								`with no correlation_token — no signal can reach it`,
+						);
+					}
 					await appendHistory(client, {
 						tenant_id,
 						instance_id,
@@ -255,14 +363,21 @@ export async function runAdvance(
 				}
 				case "pure": {
 					const before = positioned.state;
-					const result = positioned.transition(PURE_ENTER_EVENT, undefined, false);
+					const result = positioned.transition(
+						PURE_ENTER_EVENT,
+						undefined,
+						false,
+					);
 					if (result === null) {
 						await appendHistory(client, {
 							tenant_id,
 							instance_id,
 							event_type: HISTORY_EVENT.TRANSITION_REJECTED,
 							from_node: before,
-							data: { event: PURE_ENTER_EVENT, reason: "no guarded transition matched" },
+							data: {
+								event: PURE_ENTER_EVENT,
+								reason: "no guarded transition matched",
+							},
 						});
 						await failInstance(
 							client,
@@ -286,7 +401,9 @@ export async function runAdvance(
 					await failInstance(
 						client,
 						row,
-						`unknown meta.kind "${String((meta as { kind?: string }).kind)}" at state "${positioned.state}"`,
+						`unknown meta.kind "${
+							String((meta as { kind?: string }).kind)
+						}" at state "${positioned.state}"`,
 					);
 					return;
 				}
@@ -305,17 +422,53 @@ async function failInstance(
 	client: pg.PoolClient | pg.Client,
 	row: WorkflowInstanceRow,
 	reason: string,
+	extra: Record<string, unknown> = {},
 ): Promise<void> {
 	clog.error?.(`workflow instance ${row.id} failed: ${reason}`);
 	await updateInstance(client, row.id, {
 		execution_state: EXECUTION_STATE.FAILED,
-	});
+	}, { bumpSeq: true });
 	await appendHistory(client, {
 		tenant_id: row.tenant_id,
 		instance_id: row.id,
 		event_type: HISTORY_EVENT.FAILED,
 		from_node: row.cursor,
-		data: { reason },
+		data: { reason, ...extra },
+	});
+}
+
+/**
+ * Called by the Workflow layer when steve gives up on an advance job — every
+ * attempt threw, or the job expired once too often to keep re-dispatching it.
+ * Without this the instance would sit in `pending`/`running` with nothing left
+ * that could ever move it.
+ *
+ * Fenced like every other write: an advance that lost the race to a later one
+ * must not fail the instance that later one moved on.
+ */
+export async function failAdvanceJob(
+	pool: pg.Pool,
+	payload: AdvanceJobPayload,
+	reason: string,
+	jobUid?: string,
+): Promise<void> {
+	await withTransaction(pool, async (client) => {
+		const row = await lockInstance(client, payload.instance_id);
+		if (!row) return;
+		if (payload.expected_seq !== undefined && row.seq !== payload.expected_seq) {
+			clog.debug?.(
+				`failAdvanceJob: stale (row.seq=${row.seq}, expected=${payload.expected_seq}); no-op`,
+			);
+			return;
+		}
+		if (
+			row.execution_state === EXECUTION_STATE.COMPLETED ||
+			row.execution_state === EXECUTION_STATE.FAILED ||
+			row.execution_state === EXECUTION_STATE.CANCELLED
+		) {
+			return;
+		}
+		await failInstance(client, row, reason, { job_uid: jobUid ?? null });
 	});
 }
 
@@ -325,9 +478,12 @@ async function failInstance(
  * 1. Looks up the user handler in the registry by `payload.handler`.
  * 2. Loads the instance to grab the current context (no lock — handlers run
  *    outside the advance tx).
- * 3. Runs the handler.
- * 4. On success: enqueues a `workflow.advance` job with the outcome + data.
- * 5. On throw: re-throws so steve records the attempt as failed (steve retries
+ * 3. Checks the fence: the handler runs only if the row is still at the `seq`
+ *    that dispatched it. A row that moved on means this job is a duplicate or a
+ *    zombie — skip, so the side effect does not fire twice.
+ * 4. Runs the handler.
+ * 5. On success: enqueues a `workflow.advance` job with the outcome + data.
+ * 6. On throw: re-throws so steve records the attempt as failed (steve retries
  *    per the job's `max_attempts`). When steve gives up, the on-failed hook in
  *    Workflow marks the instance failed.
  *
@@ -341,7 +497,9 @@ export async function runEffect(
 	enqueuer: JobEnqueuer,
 	payload: EffectJobPayload,
 	signal?: AbortSignal,
-): Promise<{ outcome: string; data?: Record<string, unknown> }> {
+): Promise<
+	{ outcome: string; data?: Record<string, unknown> } | { skipped: "stale" }
+> {
 	const { instance_id, handler: handlerName } = payload;
 	const tenant_id = payloadTenantId(payload);
 	const handler = registry.requireHandler(handlerName);
@@ -352,7 +510,7 @@ export async function runEffect(
 		const r = await client.query<WorkflowInstanceRow>(
 			`SELECT id, tenant_id, definition_id, definition_version, cursor,
 			        previous_cursor, context, execution_state, wake_at,
-			        correlation_token, created_at, updated_at
+			        correlation_token, seq, created_at, updated_at
 			   FROM __workflow_instances WHERE id = $1`,
 			[instance_id],
 		);
@@ -365,6 +523,27 @@ export async function runEffect(
 		throw new Error(`effect: instance ${instance_id} not found`);
 	}
 
+	if (payload.seq !== undefined && row.seq !== payload.seq) {
+		if (row.seq < payload.seq) {
+			// The dispatching advance has not committed yet — steve's job insert
+			// is autocommit on its own connection, so the job can be claimed
+			// before the transaction that enqueued it lands. Throw to retry.
+			throw new Error(
+				`effect: instance ${instance_id} not yet at seq ${payload.seq} (row.seq=${row.seq})`,
+			);
+		}
+		clog.debug?.(
+			`effect: stale ${handlerName} (row.seq=${row.seq}, job seq=${payload.seq}); skipped`,
+		);
+		return { skipped: "stale" };
+	}
+	if (row.execution_state !== EXECUTION_STATE.RUNNING) {
+		clog.debug?.(
+			`effect: ${handlerName} on a non-running instance (${row.execution_state}); skipped`,
+		);
+		return { skipped: "stale" };
+	}
+
 	const result = await handler({
 		instanceId: instance_id,
 		tenantId: tenant_id,
@@ -375,8 +554,13 @@ export async function runEffect(
 	await enqueuer.enqueueAdvance(pool, {
 		tenant_id,
 		instance_id,
+		kind: "effect",
+		expected_seq: payload.seq,
 		outcome: result.outcome,
 		outcome_data: result.data,
+		handler: handlerName,
+		correlation_token: result.correlationToken,
+		context_patch: result.context,
 	});
 
 	return { outcome: result.outcome, data: result.data };
@@ -384,7 +568,9 @@ export async function runEffect(
 
 /**
  * Called by the Workflow layer when steve gives up on an effect job (all
- * attempts exhausted or expired). Marks the workflow instance as failed.
+ * attempts exhausted or expired). Marks the workflow instance as failed —
+ * unless the job is fenced out, i.e. it belongs to a step the instance has
+ * already left, in which case a dead job must not kill a healthy instance.
  */
 export async function failEffectJob(
 	pool: pg.Pool,
@@ -394,6 +580,12 @@ export async function failEffectJob(
 	await withTransaction(pool, async (client) => {
 		const row = await lockInstance(client, payload.instance_id);
 		if (!row) return;
+		if (payload.seq !== undefined && row.seq !== payload.seq) {
+			clog.debug?.(
+				`failEffectJob: stale (row.seq=${row.seq}, job seq=${payload.seq}); no-op`,
+			);
+			return;
+		}
 		if (
 			row.execution_state === EXECUTION_STATE.COMPLETED ||
 			row.execution_state === EXECUTION_STATE.FAILED ||
@@ -403,7 +595,7 @@ export async function failEffectJob(
 		}
 		await updateInstance(client, row.id, {
 			execution_state: EXECUTION_STATE.FAILED,
-		});
+		}, { bumpSeq: true });
 		await appendHistory(client, {
 			tenant_id: row.tenant_id,
 			instance_id: row.id,
@@ -419,4 +611,4 @@ export function effectJobType(handlerName: string): string {
 	return `${JOB_TYPE_EFFECT_PREFIX}${handlerName}`;
 }
 
-export { JOB_TYPE_ADVANCE };
+export { JOB_TYPE_ADVANCE, PURE_ENTER_EVENT, SIGNAL_MATCHED_EVENT };

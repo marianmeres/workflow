@@ -11,7 +11,7 @@ type Executor = pg.Pool | pg.PoolClient | pg.Client;
 const SELECT_COLUMNS = `
 	id, tenant_id, definition_id, definition_version,
 	cursor, previous_cursor, context, execution_state,
-	wake_at, correlation_token, created_at, updated_at
+	wake_at, correlation_token, seq, created_at, updated_at
 `;
 
 /**
@@ -75,6 +75,10 @@ export async function lockInstance(
 /**
  * Partial-update of a workflow instance row. Only fields present in `patch`
  * are written; `updated_at` is bumped automatically.
+ *
+ * `options.bumpSeq` advances the fencing token in the same `UPDATE` — set it on
+ * settle-point writes, so every job issued against the pre-write row becomes
+ * recognizably stale.
  */
 export async function updateInstance(
 	exec: Executor,
@@ -87,6 +91,7 @@ export async function updateInstance(
 		wake_at?: Date | null;
 		correlation_token?: string | null;
 	},
+	options: { bumpSeq?: boolean } = {},
 ): Promise<WorkflowInstanceRow> {
 	const sets: string[] = [];
 	const values: unknown[] = [];
@@ -116,6 +121,7 @@ export async function updateInstance(
 		sets.push(`correlation_token = $${i++}`);
 		values.push(patch.correlation_token);
 	}
+	if (options.bumpSeq) sets.push(`seq = seq + 1`);
 	sets.push(`updated_at = now()`);
 	values.push(id);
 
@@ -127,45 +133,82 @@ export async function updateInstance(
 	return r.rows[0];
 }
 
+/** The minimum a scheduler poke needs: who to poke, and the fence to poke with. */
+export interface InstancePoke {
+	id: string;
+	seq: number;
+}
+
 /**
- * Atomically transitions waiting+due rows to `pending` and clears their
- * `wake_at`. Returns the ids of rows that flipped — caller dispatches advance
- * jobs for each.
- *
- * Atomic on the row so two concurrent scheduler ticks can't double-dispatch.
+ * Instances whose timer has expired. Read-only on purpose: the scheduler only
+ * pokes an advance per row, and the advance — which re-checks the due-ness under
+ * the row lock — is what writes the state and clears `wake_at`. A row poked but
+ * not yet advanced stays due and is poked again next tick; the fence turns the
+ * duplicate into a no-op. Nothing is left stranded by a crash mid-tick.
  */
-export async function claimDueWakeUps(
+export async function selectDueWakeUps(
 	exec: Executor,
 	tenant_id: string,
 	limit: number = 100,
-): Promise<Array<{ id: string; correlation_token: string | null }>> {
-	const r = await exec.query<{ id: string; correlation_token: string | null }>(
-		`UPDATE __workflow_instances
-		    SET execution_state = $2,
-		        wake_at = NULL,
-		        updated_at = now()
-		  WHERE id IN (
-		      SELECT id FROM __workflow_instances
-		       WHERE tenant_id = $1
-		         AND execution_state = $3
-		         AND wake_at IS NOT NULL
-		         AND wake_at <= now()
-		       ORDER BY wake_at
-		       LIMIT $4
-		       FOR UPDATE SKIP LOCKED
-		  )
-		  RETURNING id, correlation_token`,
-		[tenant_id, EXECUTION_STATE.PENDING, EXECUTION_STATE.WAITING, limit],
+): Promise<InstancePoke[]> {
+	const r = await exec.query<InstancePoke>(
+		`SELECT id, seq FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND execution_state = $2
+		    AND wake_at IS NOT NULL
+		    AND wake_at <= now()
+		  ORDER BY wake_at
+		  LIMIT $3`,
+		[tenant_id, EXECUTION_STATE.WAITING, limit],
 	);
 	return r.rows;
 }
 
 /**
- * Finds the single waiting instance for this tenant + correlation token, if any.
- * Used by the inbox correlator. Does not lock (correlator processes one signal
- * at a time inside its own tx).
+ * Instances stuck in `pending` for longer than `older_than_sec` — the residue of
+ * a crash between `create()`'s commit and steve's (separate-connection) job
+ * insert, i.e. rows no job will ever pick up.
+ *
+ * Only meaningful because `create()` is the sole producer of `pending`: every
+ * other write path settles the row into a state this scan ignores. A row that is
+ * merely waiting on a slow queue is re-poked too, harmlessly — the second
+ * advance to reach it is fenced out.
  */
-export async function findWaitingByCorrelation(
+export async function selectStalePending(
+	exec: Executor,
+	tenant_id: string,
+	older_than_sec: number,
+	limit: number = 100,
+): Promise<InstancePoke[]> {
+	const r = await exec.query<InstancePoke>(
+		`SELECT id, seq FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND execution_state = $2
+		    AND updated_at < now() - make_interval(secs => $3::float8)
+		  ORDER BY updated_at
+		  LIMIT $4`,
+		[tenant_id, EXECUTION_STATE.PENDING, older_than_sec, limit],
+	);
+	return r.rows;
+}
+
+const TERMINAL_STATES = [
+	EXECUTION_STATE.COMPLETED,
+	EXECUTION_STATE.FAILED,
+	EXECUTION_STATE.CANCELLED,
+];
+
+/**
+ * Finds the live (non-terminal) instance owning this correlation token, if any.
+ * Used by the inbox correlator — the instance may be in any live execution
+ * state, not just `waiting`: a signal that arrives early is deferred, not
+ * dropped.
+ *
+ * The contract is one live instance per token; `ORDER BY created_at` only makes
+ * a violation deterministic (oldest wins) rather than arbitrary. Does not lock —
+ * the advance re-reads under a lock and is fenced by `seq`.
+ */
+export async function findByCorrelation(
 	exec: Executor,
 	tenant_id: string,
 	correlation_token: string,
@@ -173,10 +216,36 @@ export async function findWaitingByCorrelation(
 	const r = await exec.query<WorkflowInstanceRow>(
 		`SELECT ${SELECT_COLUMNS} FROM __workflow_instances
 		  WHERE tenant_id = $1
-		    AND execution_state = $2
-		    AND correlation_token = $3
+		    AND correlation_token = $2
+		    AND NOT (execution_state = ANY($3))
+		  ORDER BY created_at
 		  LIMIT 1`,
-		[tenant_id, EXECUTION_STATE.WAITING, correlation_token],
+		[tenant_id, correlation_token, TERMINAL_STATES],
+	);
+	return r.rows[0] ?? null;
+}
+
+/**
+ * Finds the most recent terminal instance owning this correlation token, if any.
+ * Only consulted when {@link findByCorrelation} misses, to tell "the instance is
+ * over" apart from "nobody ever owned this token".
+ *
+ * Note that a *completed* or *cancelled* instance has its token cleared, so in
+ * practice this finds the failed ones.
+ */
+export async function findTerminalByCorrelation(
+	exec: Executor,
+	tenant_id: string,
+	correlation_token: string,
+): Promise<WorkflowInstanceRow | null> {
+	const r = await exec.query<WorkflowInstanceRow>(
+		`SELECT ${SELECT_COLUMNS} FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND correlation_token = $2
+		    AND execution_state = ANY($3)
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		[tenant_id, correlation_token, TERMINAL_STATES],
 	);
 	return r.rows[0] ?? null;
 }
