@@ -146,6 +146,38 @@ Deno.test({
 });
 
 Deno.test({
+	name: "migration 1.2.0: adds the seq fence, reversible via down('1.1.0')",
+	ignore: !pgConfigured(),
+	async fn() {
+		const pool = createPg();
+		try {
+			await resetSchema(pool);
+
+			await createMigrate(pool).up("1.1.0");
+			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+
+			await createMigrate(pool).up("latest");
+			assert((await columns(pool, "__workflow_instances")).includes("seq"));
+
+			// Pre-existing rows migrate in at the fence's zero point.
+			const { rows } = await pool.query<{ seq: number }>(
+				`INSERT INTO __workflow_instances
+					(tenant_id, definition_id, definition_version, cursor, execution_state)
+				 VALUES ('acme', 'def', '1.0.0', 'start', 'pending')
+				 RETURNING seq`,
+			);
+			assertEquals(rows[0].seq, 0);
+
+			await createMigrate(pool).down("1.1.0");
+			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
+			assert((await columns(pool, "__workflow_instances")).includes("tenant_id"));
+		} finally {
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
 	name:
 		"upgrade path: an in-flight job with a legacy project_id payload still advances",
 	ignore: !pgConfigured(),

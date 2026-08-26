@@ -98,7 +98,8 @@ export class WorkflowScheduler {
 			const payload: AdvanceJobPayload = {
 				tenant_id: this.tenantId,
 				instance_id: row.id,
-				timeout: true,
+				kind: "timeout",
+				expected_seq: row.seq,
 				outcome: "TIMEOUT",
 			};
 			await this.#workflow.enqueueAdvance(this.#workflow.db, payload);

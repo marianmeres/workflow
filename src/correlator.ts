@@ -202,9 +202,13 @@ export class WorkflowInboxCorrelator {
 			[instance.id, EXECUTION_STATE.PENDING],
 		);
 
+		// The flip above deliberately leaves `seq` alone: the fence must still
+		// match when this advance lands.
 		await this.#workflow.enqueueAdvance(this.#workflow.db, {
 			tenant_id: this.tenantId,
 			instance_id: instance.id,
+			kind: "signal",
+			expected_seq: instance.seq,
 			outcome: "MATCHED",
 			outcome_data: row.payload,
 		});

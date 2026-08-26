@@ -59,6 +59,7 @@ export {
 	HISTORY_EVENT,
 	JOB_TYPE_EFFECT_PREFIX,
 	type AdvanceJobPayload,
+	type AdvanceKind,
 	type EffectJobPayload,
 	type ExecutionState,
 	type Handler,

@@ -2,6 +2,7 @@ import { Migrate } from "@marianmeres/migrate";
 import type pg from "pg";
 import { down as down_1_0_0, up as up_1_0_0 } from "./1_0_0.ts";
 import { down as down_1_1_0, up as up_1_1_0 } from "./1_1_0.ts";
+import { down as down_1_2_0, up as up_1_2_0 } from "./1_2_0.ts";
 
 const VERSION_TABLE = "__workflow_migrations";
 
@@ -37,6 +38,7 @@ export function createMigrate(
 
 	migrate.addVersion("1.0.0", up_1_0_0, down_1_0_0);
 	migrate.addVersion("1.1.0", up_1_1_0, down_1_1_0);
+	migrate.addVersion("1.2.0", up_1_2_0, down_1_2_0);
 
 	return migrate;
 }

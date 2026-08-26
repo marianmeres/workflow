@@ -11,7 +11,7 @@ type Executor = pg.Pool | pg.PoolClient | pg.Client;
 const SELECT_COLUMNS = `
 	id, tenant_id, definition_id, definition_version,
 	cursor, previous_cursor, context, execution_state,
-	wake_at, correlation_token, created_at, updated_at
+	wake_at, correlation_token, seq, created_at, updated_at
 `;
 
 /**
@@ -75,6 +75,10 @@ export async function lockInstance(
 /**
  * Partial-update of a workflow instance row. Only fields present in `patch`
  * are written; `updated_at` is bumped automatically.
+ *
+ * `options.bumpSeq` advances the fencing token in the same `UPDATE` — set it on
+ * settle-point writes, so every job issued against the pre-write row becomes
+ * recognizably stale.
  */
 export async function updateInstance(
 	exec: Executor,
@@ -87,6 +91,7 @@ export async function updateInstance(
 		wake_at?: Date | null;
 		correlation_token?: string | null;
 	},
+	options: { bumpSeq?: boolean } = {},
 ): Promise<WorkflowInstanceRow> {
 	const sets: string[] = [];
 	const values: unknown[] = [];
@@ -116,6 +121,7 @@ export async function updateInstance(
 		sets.push(`correlation_token = $${i++}`);
 		values.push(patch.correlation_token);
 	}
+	if (options.bumpSeq) sets.push(`seq = seq + 1`);
 	sets.push(`updated_at = now()`);
 	values.push(id);
 
@@ -138,8 +144,10 @@ export async function claimDueWakeUps(
 	exec: Executor,
 	tenant_id: string,
 	limit: number = 100,
-): Promise<Array<{ id: string; correlation_token: string | null }>> {
-	const r = await exec.query<{ id: string; correlation_token: string | null }>(
+): Promise<Array<{ id: string; correlation_token: string | null; seq: number }>> {
+	const r = await exec.query<
+		{ id: string; correlation_token: string | null; seq: number }
+	>(
 		`UPDATE __workflow_instances
 		    SET execution_state = $2,
 		        wake_at = NULL,
@@ -154,7 +162,7 @@ export async function claimDueWakeUps(
 		       LIMIT $4
 		       FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING id, correlation_token`,
+		  RETURNING id, correlation_token, seq`,
 		[tenant_id, EXECUTION_STATE.PENDING, EXECUTION_STATE.WAITING, limit],
 	);
 	return r.rows;

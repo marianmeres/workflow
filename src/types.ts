@@ -95,6 +95,11 @@ export interface WorkflowInstanceRow {
 	execution_state: ExecutionState;
 	wake_at: Date | null;
 	correlation_token: string | null;
+	/**
+	 * Fencing token. Bumped by every settle-point write; jobs carry the value
+	 * they were issued against, so a stale one is recognized and dropped.
+	 */
+	seq: number;
 	created_at: Date;
 	updated_at: Date;
 }
@@ -147,16 +152,30 @@ export const JOB_TYPE_ADVANCE = "workflow.advance";
 /** Steve job-type prefix for effect-handler jobs. Full type is `workflow.effect.<handlerName>`. */
 export const JOB_TYPE_EFFECT_PREFIX = "workflow.effect.";
 
+/** What produced a `workflow.advance` job. Drives the driver's preconditions. */
+export type AdvanceKind = "start" | "effect" | "timeout" | "signal";
+
 /** Payload of a `workflow.advance` job. */
 export interface AdvanceJobPayload {
 	tenant_id: string;
 	instance_id: string;
+	/**
+	 * What produced this advance. Absent on jobs queued before the fence
+	 * existed — the driver then infers it from the payload shape.
+	 */
+	kind?: AdvanceKind;
+	/**
+	 * Fencing token: the instance `seq` this advance was issued against. The
+	 * driver drops the job if the locked row has moved past it. Absent =
+	 * unfenced (a job queued before the fence existed).
+	 */
+	expected_seq?: number;
 	/** Optional outcome label to apply before dispatching. Set when an effect/signal completes. */
 	outcome?: string;
 	/** Optional payload to merge into context via the outcome's `data` field. */
 	outcome_data?: Record<string, unknown>;
-	/** Marks this advance as a TIMEOUT wake-up (so the driver emits a TIMEOUT outcome). */
-	timeout?: boolean;
+	/** Effect handler that produced the outcome. `kind: "effect"` only; for history. */
+	handler?: string;
 	[key: string]: unknown;
 }
 
@@ -165,6 +184,14 @@ export interface EffectJobPayload {
 	tenant_id: string;
 	instance_id: string;
 	handler: string;
+	/**
+	 * Fencing token: the instance `seq` at dispatch time. A handler is not run
+	 * against a row that has moved past it. Absent = unfenced (a job queued
+	 * before the fence existed).
+	 */
+	seq?: number;
+	/** Node that dispatched this effect. Diagnostics only. */
+	cursor?: string;
 	[key: string]: unknown;
 }
 

@@ -19,6 +19,7 @@ import {
 	createInstance,
 	findInstance,
 } from "./persistence/instances.ts";
+import { withTransaction } from "./persistence/tx.ts";
 import { WorkflowRegistry } from "./registry.ts";
 import {
 	type AdvanceJobPayload,
@@ -184,26 +185,37 @@ export class Workflow implements JobEnqueuer {
 			input.definitionId,
 			input.definitionVersion,
 		);
-		const row = await createInstance(this.db, {
-			tenant_id: this.tenantId,
-			definition_id: input.definitionId,
-			definition_version: input.definitionVersion,
-			cursor: def.fsm.initial,
-			context: input.context ?? {},
-			correlation_token: input.correlationToken ?? null,
+		// One transaction: a throwing enqueue rolls the instance back rather than
+		// leaving a row nothing will ever advance. Steve inserts on its own
+		// connection, so the job can be claimed before this commits — the advance
+		// throws on the not-yet-visible row and steve retries it.
+		return await withTransaction(this.db, async (client) => {
+			const row = await createInstance(client, {
+				tenant_id: this.tenantId,
+				definition_id: input.definitionId,
+				definition_version: input.definitionVersion,
+				cursor: def.fsm.initial,
+				context: input.context ?? {},
+				correlation_token: input.correlationToken ?? null,
+			});
+			await appendHistory(client, {
+				tenant_id: this.tenantId,
+				instance_id: row.id,
+				event_type: HISTORY_EVENT.CREATED,
+				to_node: row.cursor,
+				data: {
+					definitionId: input.definitionId,
+					definitionVersion: input.definitionVersion,
+				},
+			});
+			await this.jobs.create(JOB_TYPE_ADVANCE, {
+				tenant_id: this.tenantId,
+				instance_id: row.id,
+				kind: "start",
+				expected_seq: row.seq,
+			} as AdvanceJobPayload);
+			return row;
 		});
-		await appendHistory(this.db, {
-			tenant_id: this.tenantId,
-			instance_id: row.id,
-			event_type: HISTORY_EVENT.CREATED,
-			to_node: row.cursor,
-			data: { definitionId: input.definitionId, definitionVersion: input.definitionVersion },
-		});
-		await this.jobs.create(JOB_TYPE_ADVANCE, {
-			tenant_id: this.tenantId,
-			instance_id: row.id,
-		} as AdvanceJobPayload);
-		return row;
 	}
 
 	/** Looks up an instance by id, scoped to this Workflow's tenant. */
