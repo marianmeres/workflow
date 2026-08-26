@@ -44,16 +44,16 @@ Verify: deno fmt --check
 
 | Status | ID  | Deps                                    | Task                                                                                               | Source                           | Commit |
 | ------ | --- | --------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------- | ------ |
-| ✅     | T15 | —                                       | `deno fmt` + `deno lint` clean; `deno task check`; `fmt.exclude` for this tracker                   | [04](./04-docs-tests-ops.md) #4  | —      |
-| ✅     | T13 | —                                       | `tests/driver.test.ts`: pure routing, hop guard, rejections, unknown definition; `tests/_util.ts`   | [04](./04-docs-tests-ops.md) #3  | —      |
-| ✅     | T12 | —                                       | Migration 1.1.0 guard: `table_schema = current_schema()`                                           | [04](./04-docs-tests-ops.md) #2  | —      |
-| ✅     | T06 | —                                       | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)         | [03](./03-definition-and-api.md) #1 | —   |
-| ✅     | T09 | —                                       | `create()` seeds context from `def.fsm.context`, input overlays                                    | [03](./03-definition-and-api.md) #2 | —   |
-| ✅     | T10 | —                                       | Guard: one `Workflow` per `Jobs` (WeakMap + throw) and `detach()`                                  | [03](./03-definition-and-api.md) #3 | —   |
-| ✅     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | —      |
-| ✅     | T17 | T08                                     | Opt-in `HandlerResult.context` shallow patch before the outcome transition                         | [03](./03-definition-and-api.md) #4 | —   |
-| ✅     | T07 | T01                                     | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event             | [01](./01-durability.md) #4      | —      |
-| ✅     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | —   |
+| ✅     | T15 | —                                       | `deno fmt` + `deno lint` clean; `deno task check`; `fmt.exclude` for this tracker                   | [04](./04-docs-tests-ops.md) #4  | 25df0af |
+| ✅     | T13 | —                                       | `tests/driver.test.ts`: pure routing, hop guard, rejections, unknown definition; `tests/_util.ts`   | [04](./04-docs-tests-ops.md) #3  | fb296f5 |
+| ✅     | T12 | —                                       | Migration 1.1.0 guard: `table_schema = current_schema()`                                           | [04](./04-docs-tests-ops.md) #2  | 18362df |
+| ✅     | T06 | —                                       | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)         | [03](./03-definition-and-api.md) #1 | 4a3fc30 |
+| ✅     | T09 | —                                       | `create()` seeds context from `def.fsm.context`, input overlays                                    | [03](./03-definition-and-api.md) #2 | 402d4e7 |
+| ✅     | T10 | —                                       | Guard: one `Workflow` per `Jobs` (WeakMap + throw) and `detach()`                                  | [03](./03-definition-and-api.md) #3 | 29a5bb1 |
+| ✅     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | 1a947a8 |
+| ✅     | T17 | T08                                     | Opt-in `HandlerResult.context` shallow patch before the outcome transition                         | [03](./03-definition-and-api.md) #4 | efce4a7 |
+| ✅     | T07 | T01                                     | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event             | [01](./01-durability.md) #4      | 3bafa6b |
+| ✅     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | 10031bd |
 | 🔒     | T16 | T06 T07 T08 T09 T10 T12 T13 T14 T15 T17 | Release 2.1.0 to JSR + npm (`deno task rpm`); smoke-run the npm build under Node first             | [04](./04-docs-tests-ops.md) #1  | —      |
 
 The whole backlog, promoted in **run order rather than rank order**: T15 first because it makes
