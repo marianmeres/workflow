@@ -12,7 +12,8 @@ import type pg from "pg";
 
 const columns = async (pool: pg.Pool, table: string): Promise<string[]> => {
 	const { rows } = await pool.query<{ column_name: string }>(
-		`SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = current_schema() AND table_name = $1`,
 		[table],
 	);
 	return rows.map((r) => r.column_name);
@@ -137,6 +138,37 @@ Deno.test({
 				`SELECT project_id FROM __workflow_instances`,
 			);
 			assertEquals(rows[0].project_id, "acme");
+		} finally {
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name: "migration 1.1.0: the rename guard ignores other schemas",
+	ignore: !pgConfigured(),
+	async fn() {
+		// The second schema is the session's own `pg_temp_N` — the only schema a
+		// test role is guaranteed to be able to create a table in. `max: 1` keeps
+		// the temp table and the migration on one connection (temp schemas are
+		// session-local), and the explicit `search_path` puts `pg_temp` *last* so
+		// unqualified DDL still resolves to the current schema.
+		const pool = createPg({ max: 1 });
+		try {
+			await resetSchema(pool);
+			await pool.query(`SET search_path = "$user", public, pg_temp`);
+			// Same table name in another schema, already carrying the *target*
+			// column: a guard blind to `table_schema` reads that as "already
+			// migrated" and skips the rename in the schema that needs it.
+			await pool.query(`CREATE TEMP TABLE __workflow_instances (tenant_id text)`);
+
+			await createMigrate(pool).up("1.0.0");
+			assert((await columns(pool, "__workflow_instances")).includes("project_id"));
+
+			await createMigrate(pool).up("latest");
+			const cols = await columns(pool, "__workflow_instances");
+			assert(cols.includes("tenant_id"), "the current schema must be renamed");
+			assert(!cols.includes("project_id"));
 		} finally {
 			await pool.end();
 		}

@@ -13,13 +13,13 @@ export function pgConfigured(): boolean {
 	return Boolean(env.database && env.user);
 }
 
-export function createPg(): pg.Pool {
+export function createPg(overrides: pg.PoolConfig = {}): pg.Pool {
 	if (!pgConfigured()) {
 		throw new Error(
 			"PG test env not configured (need TEST_PG_DATABASE, TEST_PG_USER, optionally TEST_PG_HOST/PORT/PASSWORD)",
 		);
 	}
-	return new pg.Pool(env);
+	return new pg.Pool({ ...env, ...overrides });
 }
 
 /**
