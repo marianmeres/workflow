@@ -97,7 +97,7 @@ An instance can be at node `await_reply` (cursor) and simultaneously `waiting` (
 
 ## Node Taxonomy (`NodeMeta`)
 
-Each FSM state's `meta` field carries a discriminated `NodeMeta`. The driver dispatches on `meta.kind`:
+Each FSM state's `meta` field carries a discriminated `NodeMeta` — required and typed, because a definition's `fsm` is a `WorkflowFSMConfig`, not a raw `FSMConfig` (fsm's own `meta` is `unknown`). The driver dispatches on `meta.kind`:
 
 | Kind         | Driver behavior                                                                                                                                                                               | Required fields                           |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
@@ -159,7 +159,9 @@ This is what makes at-least-once job delivery safe. Duplicate deliveries are _ex
 | `NodeMeta`                     | type     | Discriminated union: `pure` \| `effectful` \| `suspending` \| `terminal`                                                                                                                 |
 | `AdvanceKind`                  | type     | `"start" \| "effect" \| "timeout" \| "signal"` — what produced an advance; drives its preconditions                                                                                      |
 | `SchedulerTickResult`          | type     | `{ woken, repoked }` — what one scheduler tick poked                                                                                                                                     |
-| `WorkflowDefinition`           | type     | `{ id, version, fsm: FSMConfig }`                                                                                                                                                        |
+| `WorkflowDefinition`           | type     | `{ id, version, fsm: WorkflowFSMConfig }`                                                                                                                                                |
+| `WorkflowFSMConfig`            | type     | `FSMConfig` with `states: Record<TState, WorkflowStateConfig>` — narrowing only, still a valid `FSMConfig`                                                                               |
+| `WorkflowStateConfig`          | type     | fsm state config with `meta: NodeMeta` required instead of `meta?: unknown`                                                                                                              |
 | `Handler`                      | type     | `(args: HandlerArgs) => Promise<HandlerResult> \| HandlerResult`                                                                                                                         |
 | `Matcher`                      | type     | `(args: MatcherArgs) => boolean \| Promise<boolean>`                                                                                                                                     |
 | `WorkflowInstanceRow`          | type     | Schema-aligned row type                                                                                                                                                                  |

@@ -1,5 +1,4 @@
 import type { Cron } from "@marianmeres/cron";
-import type { FSMConfig } from "@marianmeres/fsm";
 import type pg from "pg";
 import { SIGNAL_MATCHED_EVENT } from "./driver.ts";
 import { clog } from "./log.ts";
@@ -12,8 +11,7 @@ import {
 	EXECUTION_STATE,
 	HISTORY_EVENT,
 	type InboxRow,
-	type NodeMeta,
-	type WorkflowContext,
+	type WorkflowStateConfig,
 } from "./types.ts";
 import type { Workflow } from "./workflow.ts";
 
@@ -216,10 +214,8 @@ export class WorkflowInboxCorrelator {
 			instance.definition_id,
 			instance.definition_version,
 		);
-		const stateCfg = def?.fsm
-			.states[instance.cursor as keyof typeof def.fsm.states] as
-				| (FSMConfig<string, string, WorkflowContext>["states"][string])
-				| undefined;
+		const stateCfg: WorkflowStateConfig | undefined = def?.fsm
+			.states[instance.cursor];
 
 		// A node with no MATCHED (or wildcard) edge is not a delivery target:
 		// poking it would make the fsm reject the transition and fail the
@@ -230,7 +226,7 @@ export class WorkflowInboxCorrelator {
 		}
 
 		// Run matcher if any. No matcher = correlation_token alone is the gate.
-		const meta = stateCfg?.meta as NodeMeta | undefined;
+		const meta = stateCfg?.meta;
 		if (meta && meta.kind === "suspending" && meta.matcher) {
 			let matched: boolean;
 			try {

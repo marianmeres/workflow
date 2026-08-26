@@ -134,6 +134,27 @@ Deno.test("validator: terminal state with transitions is rejected", () => {
 	);
 });
 
+Deno.test("validator: a misspelled meta.kind is caught at compile time too", () => {
+	const states: States = {
+		e: {
+			// @ts-expect-error — "efectful" is not a NodeMeta kind
+			meta: { kind: "efectful", handler: "doEffect" },
+			on: { OK: "_end" },
+		},
+		_end: END,
+	};
+	assertRejects(states, `state "e" has unknown meta.kind "efectful"`);
+});
+
+Deno.test("validator: a state without meta is caught at compile time too", () => {
+	const states: States = {
+		// @ts-expect-error — `meta` is required on WorkflowStateConfig
+		e: { on: { OK: "_end" } },
+		_end: END,
+	};
+	assertRejects(states, `state "e" is missing meta`);
+});
+
 Deno.test("validator: the shipped fixtures still validate", () => {
 	const { handlers, matchers } = makeHandlers();
 	new WorkflowRegistry({

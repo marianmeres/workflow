@@ -73,6 +73,8 @@ export {
 	type NodeMeta,
 	type WorkflowContext,
 	type WorkflowDefinition,
+	type WorkflowFSMConfig,
 	type WorkflowInstanceRow,
 	type WorkflowSnapshot,
+	type WorkflowStateConfig,
 } from "./types.ts";

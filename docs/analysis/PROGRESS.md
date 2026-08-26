@@ -53,7 +53,7 @@ Verify: deno fmt --check
 | ✅     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | —      |
 | ✅     | T17 | T08                                     | Opt-in `HandlerResult.context` shallow patch before the outcome transition                         | [03](./03-definition-and-api.md) #4 | —   |
 | ✅     | T07 | T01                                     | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event             | [01](./01-durability.md) #4      | —      |
-| ⬜     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | —   |
+| ✅     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | —   |
 | 🔒     | T16 | T06 T07 T08 T09 T10 T12 T13 T14 T15 T17 | Release 2.1.0 to JSR + npm (`deno task rpm`); smoke-run the npm build under Node first             | [04](./04-docs-tests-ops.md) #1  | —      |
 
 The whole backlog, promoted in **run order rather than rank order**: T15 first because it makes

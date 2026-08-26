@@ -16,6 +16,7 @@ Full public API for [`@marianmeres/workflow`](./README.md).
   - [effectJobType](#effectjobtypename)
 - [Types](#types)
   - [WorkflowDefinition](#workflowdefinition)
+  - [WorkflowFSMConfig](#workflowfsmconfig--workflowstateconfig)
   - [NodeMeta](#nodemeta)
   - [Handler](#handler--handlerargs--handlerresult)
   - [Matcher](#matcher--matcherargs)
@@ -378,11 +379,29 @@ type WorkflowDefinition<TState extends string = string, TEvent extends string = 
 	{
 		id: string;
 		version: string;
-		fsm: FSMConfig<TState, TEvent, WorkflowContext>;
+		fsm: WorkflowFSMConfig<TState, TEvent>;
 	};
 ```
 
 The `fsm` field is a [`@marianmeres/fsm`](https://jsr.io/@marianmeres/fsm) config. Each state config carries `meta: NodeMeta` — the FSM passes it through, the workflow driver dispatches on it.
+
+---
+
+### `WorkflowFSMConfig` / `WorkflowStateConfig`
+
+```typescript
+type WorkflowStateConfig<TState extends string = string, TEvent extends string = string> =
+	& FSMStatesConfigValue<TState, TEvent, WorkflowContext>
+	& { meta: NodeMeta };
+
+type WorkflowFSMConfig<TState extends string = string, TEvent extends string = string> =
+	& Omit<FSMConfig<TState, TEvent, WorkflowContext>, "states">
+	& { states: Record<TState, WorkflowStateConfig<TState, TEvent>> };
+```
+
+fsm's own per-state `meta` is `unknown`, so `{ kind: "efectful" }` would type-check and only blow up in `validateDefinition`. These two narrow it to [`NodeMeta`](#nodemeta) and make it required — you get autocomplete on `kind`, `handler`, `matcher` and `timeoutSec` while authoring.
+
+Narrowing only: a `WorkflowFSMConfig` is still a valid `FSMConfig`, so anything that accepts one accepts a definition's `fsm`. The only definitions that stop compiling are those `validateDefinition` already rejected.
 
 ---
 

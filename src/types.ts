@@ -1,4 +1,4 @@
-import type { FSMConfig, FSMSnapshot } from "@marianmeres/fsm";
+import type { FSMConfig, FSMSnapshot, FSMStatesConfigValue } from "@marianmeres/fsm";
 
 /**
  * Default tenant id used when none is supplied. Mirrors the convention from
@@ -32,6 +32,29 @@ export type NodeMeta =
 export type WorkflowContext = Record<string, unknown>;
 
 /**
+ * An fsm state config narrowed for workflow use: `meta` is a required
+ * {@link NodeMeta} instead of fsm's `unknown`, so a misspelled `kind` or a
+ * missing `handler` is an editor error rather than a construction-time throw.
+ */
+export type WorkflowStateConfig<
+	TState extends string = string,
+	TEvent extends string = string,
+> =
+	& FSMStatesConfigValue<TState, TEvent, WorkflowContext>
+	& { meta: NodeMeta };
+
+/**
+ * An fsm config whose states are {@link WorkflowStateConfig}s. Narrowing only —
+ * still assignable to `FSMConfig`, so `FSM.fromSnapshot(def.fsm, …)` accepts it.
+ */
+export type WorkflowFSMConfig<
+	TState extends string = string,
+	TEvent extends string = string,
+> =
+	& Omit<FSMConfig<TState, TEvent, WorkflowContext>, "states">
+	& { states: Record<TState, WorkflowStateConfig<TState, TEvent>> };
+
+/**
  * A workflow definition: pure, JSON-serializable data. The fsm config carries
  * per-state {@link NodeMeta} on its `meta` field; the driver dispatches on
  * `meta.kind`. Outcome labels are fsm events.
@@ -42,7 +65,7 @@ export interface WorkflowDefinition<
 > {
 	id: string;
 	version: string;
-	fsm: FSMConfig<TState, TEvent, WorkflowContext>;
+	fsm: WorkflowFSMConfig<TState, TEvent>;
 }
 
 /** Result returned by an effectful node's handler. */

@@ -64,7 +64,9 @@ export function validateDefinition(
 	let terminalCount = 0;
 
 	for (const [stateName, stateCfg] of Object.entries(def.fsm.states)) {
-		const meta = stateCfg.meta as NodeMeta | undefined;
+		// Typed as required by `WorkflowStateConfig`, but a JS caller can still
+		// hand us anything, so the runtime shape is checked all the same.
+		const meta: NodeMeta | undefined = stateCfg.meta;
 		if (!meta || typeof meta !== "object") {
 			throw new Error(
 				`Workflow definition "${def.id}@${def.version}": state "${stateName}" is missing meta`,
