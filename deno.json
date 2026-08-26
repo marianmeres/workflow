@@ -1,9 +1,16 @@
 {
 	"name": "@marianmeres/workflow",
-	"version": "2.0.0",
+	"version": "2.1.0",
 	"exports": "./src/mod.ts",
 	"publish": {
-		"exclude": [".*", "tests/**", "example/**", "docs/**", "scripts/**", "tmp/**"]
+		"exclude": [
+			".*",
+			"tests/**",
+			"example/**",
+			"docs/**",
+			"scripts/**",
+			"tmp/**"
+		]
 	},
 	"tasks": {
 		"check": "deno fmt --check && deno lint && deno check src/mod.ts tests/*.ts example/server.ts example/workflow.ts",
@@ -38,7 +45,9 @@
 		"@types/pg": "npm:@types/pg@^8.23.1",
 		"pg": "npm:pg@^8.23.0"
 	},
-	"exclude": ["example/dist"],
+	"exclude": [
+		"example/dist"
+	],
 	"fmt": {
 		"useTabs": true,
 		"lineWidth": 90,
