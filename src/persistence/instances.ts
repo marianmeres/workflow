@@ -9,7 +9,7 @@ import {
 type Executor = pg.Pool | pg.PoolClient | pg.Client;
 
 const SELECT_COLUMNS = `
-	id, project_id, definition_id, definition_version,
+	id, tenant_id, definition_id, definition_version,
 	cursor, previous_cursor, context, execution_state,
 	wake_at, correlation_token, created_at, updated_at
 `;
@@ -22,7 +22,7 @@ const SELECT_COLUMNS = `
 export async function createInstance(
 	exec: Executor,
 	input: {
-		project_id: string;
+		tenant_id: string;
 		definition_id: string;
 		definition_version: string;
 		cursor: string;
@@ -32,11 +32,11 @@ export async function createInstance(
 ): Promise<WorkflowInstanceRow> {
 	const r = await exec.query<WorkflowInstanceRow>(
 		`INSERT INTO __workflow_instances
-			(project_id, definition_id, definition_version, cursor, context, execution_state, correlation_token)
+			(tenant_id, definition_id, definition_version, cursor, context, execution_state, correlation_token)
 		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
 		 RETURNING ${SELECT_COLUMNS}`,
 		[
-			input.project_id,
+			input.tenant_id,
 			input.definition_id,
 			input.definition_version,
 			input.cursor,
@@ -136,7 +136,7 @@ export async function updateInstance(
  */
 export async function claimDueWakeUps(
 	exec: Executor,
-	project_id: string,
+	tenant_id: string,
 	limit: number = 100,
 ): Promise<Array<{ id: string; correlation_token: string | null }>> {
 	const r = await exec.query<{ id: string; correlation_token: string | null }>(
@@ -146,7 +146,7 @@ export async function claimDueWakeUps(
 		        updated_at = now()
 		  WHERE id IN (
 		      SELECT id FROM __workflow_instances
-		       WHERE project_id = $1
+		       WHERE tenant_id = $1
 		         AND execution_state = $3
 		         AND wake_at IS NOT NULL
 		         AND wake_at <= now()
@@ -155,28 +155,28 @@ export async function claimDueWakeUps(
 		       FOR UPDATE SKIP LOCKED
 		  )
 		  RETURNING id, correlation_token`,
-		[project_id, EXECUTION_STATE.PENDING, EXECUTION_STATE.WAITING, limit],
+		[tenant_id, EXECUTION_STATE.PENDING, EXECUTION_STATE.WAITING, limit],
 	);
 	return r.rows;
 }
 
 /**
- * Finds the single waiting instance for this project + correlation token, if any.
+ * Finds the single waiting instance for this tenant + correlation token, if any.
  * Used by the inbox correlator. Does not lock (correlator processes one signal
  * at a time inside its own tx).
  */
 export async function findWaitingByCorrelation(
 	exec: Executor,
-	project_id: string,
+	tenant_id: string,
 	correlation_token: string,
 ): Promise<WorkflowInstanceRow | null> {
 	const r = await exec.query<WorkflowInstanceRow>(
 		`SELECT ${SELECT_COLUMNS} FROM __workflow_instances
-		  WHERE project_id = $1
+		  WHERE tenant_id = $1
 		    AND execution_state = $2
 		    AND correlation_token = $3
 		  LIMIT 1`,
-		[project_id, EXECUTION_STATE.WAITING, correlation_token],
+		[tenant_id, EXECUTION_STATE.WAITING, correlation_token],
 	);
 	return r.rows[0] ?? null;
 }

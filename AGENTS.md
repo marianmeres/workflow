@@ -60,12 +60,16 @@ src/
 │   └── tx.ts               # withTransaction helper
 └── migrations/
     ├── 1_0_0.ts            # CREATE/DROP three tables
+    ├── 1_1_0.ts            # rename project_id -> tenant_id (in place)
     └── index.ts            # createMigrate(pool) — @marianmeres/migrate setup
 tests/
 ├── _pg.ts                  # env-driven pool + schema reset
 ├── fixtures/
-│   └── stock-replenishment.ts  # reference workflow used by tests only
-└── stock_replenishment.test.ts # happy/timeout/fail paths + validator
+│   ├── stock-replenishment.ts  # reference workflow used by tests only
+│   └── weekly-digest.ts        # recurring-trigger reference workflow
+├── migrations.test.ts          # schema rename up/down + legacy payload drain
+├── stock_replenishment.test.ts # happy/timeout/fail paths + validator
+└── weekly_digest.test.ts       # recurring trigger via cron
 ```
 
 ## Conceptual Model — Three Layers
@@ -114,7 +118,7 @@ Each FSM state's `meta` field carries a discriminated `NodeMeta`. The driver dis
 | `JOB_TYPE_ADVANCE` | const | `"workflow.advance"` |
 | `JOB_TYPE_EFFECT_PREFIX` | const | `"workflow.effect."` |
 | `PURE_ENTER_EVENT` | const | `"ENTER"` — synthetic event fired by driver into pure nodes |
-| `DEFAULT_PROJECT_ID` | const | `"_default"` |
+| `DEFAULT_TENANT_ID` | const | `"_default"` |
 | `EXECUTION_STATE` | const | `{ PENDING, RUNNING, WAITING, COMPLETED, FAILED, CANCELLED }` |
 | `HISTORY_EVENT` | const | Audit event-type strings (`created`, `transition`, `effect_dispatched`, ...) |
 | `NodeMeta` | type | Discriminated union: `pure` \| `effectful` \| `suspending` \| `terminal` |
@@ -145,12 +149,23 @@ Effectful node outcomes are whatever the handler returns (e.g. `LOW`, `OK`, `CON
 
 | Table | Purpose | Indexes |
 |---|---|---|
-| `__workflow_instances` | Live instance rows | `(project_id, execution_state, wake_at)` partial, `(project_id, execution_state, correlation_token)` partial |
-| `__workflow_inbox` | Append-only intake of external signals | `(project_id, correlation_token)` partial WHERE unprocessed |
+| `__workflow_instances` | Live instance rows | `(tenant_id, execution_state, wake_at)` partial, `(tenant_id, execution_state, correlation_token)` partial |
+| `__workflow_inbox` | Append-only intake of external signals | `(tenant_id, correlation_token)` partial WHERE unprocessed |
 | `__workflow_history` | Append-only audit log | `(instance_id, at)` |
 | `__workflow_migrations` | Active migration version | — |
 
 Steve and Cron own their own tables (`__job*`, `__cron*`); managed by their respective libraries.
+
+**Schema versions** (registered in `src/migrations/index.ts`, applied via `createMigrate(pool).up("latest")`):
+
+| Version | Change |
+|---|---|
+| `1.0.0` | Creates the three framework tables + indexes. |
+| `1.1.0` | Renames `project_id` -> `tenant_id` on all three tables (in place, data preserved, idempotent, reversible). |
+
+Migration files are an append-only ledger: `1_0_0.ts` still creates `project_id` and is deliberately left untouched — `1_1_0.ts` performs the rename, so fresh installs and upgrades converge on the same schema.
+
+`driver.ts` reads the tenant off a job payload via `payloadTenantId()`, which falls back to a legacy `project_id` key so jobs enqueued before 1.1.0 still drain. Transitional — removable once no pre-1.1.0 job can be queued.
 
 ## Runtime Ownership
 
@@ -174,7 +189,7 @@ await cron.stop();     // consumer
 await jobs.stop();     // consumer
 ```
 
-The consumer's other steve job types and cron jobs coexist on the same `Jobs` / `Cron` instances — handlers are keyed by `type` (steve) / `name` (cron), and the workflow's are namespaced (`workflow.advance`, `workflow.effect.<name>`, `workflow.scheduler.<projectId>`, `workflow.correlator.<projectId>`) so collisions are unlikely. Running parallel `Jobs` instances on the same `__job` table is **unsafe**: an instance polling a type it doesn't know falls back to a noop handler that silently marks the job completed (see [steve/jobs.ts:499](file:///Users/mm/projects/@marianmeres/steve/src/steve/jobs.ts)). Always share.
+The consumer's other steve job types and cron jobs coexist on the same `Jobs` / `Cron` instances — handlers are keyed by `type` (steve) / `name` (cron), and the workflow's are namespaced (`workflow.advance`, `workflow.effect.<name>`, `workflow.scheduler.<tenantId>`, `workflow.correlator.<tenantId>`) so collisions are unlikely. Running parallel `Jobs` instances on the same `__job` table is **unsafe**: an instance polling a type it doesn't know falls back to a noop handler that silently marks the job completed (see [steve/jobs.ts:499](file:///Users/mm/projects/@marianmeres/steve/src/steve/jobs.ts)). Always share.
 
 ## Critical Conventions
 
@@ -198,11 +213,11 @@ The consumer's other steve job types and cron jobs coexist on the same `Jobs` / 
 | Package | Min | Why |
 |---|---|---|
 | `@marianmeres/fsm` | `^3.1.0` | Requires `state.meta` and `FSM.fromSnapshot` (added in 3.1.0) |
-| `@marianmeres/steve` | `^2.0.2` | Job queue (advance + effect dispatch) |
-| `@marianmeres/cron` | `^2.0.1` | Scheduler + correlator ticks |
-| `@marianmeres/migrate` | `^1.2.2` | Schema versioning |
+| `@marianmeres/steve` | `^3.0.0` | Job queue (advance + effect dispatch) |
+| `@marianmeres/cron` | `^3.2.0` | Scheduler + correlator ticks |
+| `@marianmeres/migrate` | `^1.3.1` | Schema versioning |
 | `@marianmeres/clog` | `^3.21.0` | Logging |
-| `pg` | `^8.20.0` | PostgreSQL client |
+| `pg` | `^8.23.0` | PostgreSQL client |
 
 ## Failure Modes & Recovery
 

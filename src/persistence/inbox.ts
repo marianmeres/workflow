@@ -4,7 +4,7 @@ import type { InboxRow } from "../types.ts";
 type Executor = pg.Pool | pg.PoolClient | pg.Client;
 
 const SELECT_COLUMNS = `
-	id, project_id, received_at, source, correlation_token, payload, processed_at
+	id, tenant_id, received_at, source, correlation_token, payload, processed_at
 `;
 
 /**
@@ -14,18 +14,18 @@ const SELECT_COLUMNS = `
 export async function appendInbox(
 	exec: Executor,
 	input: {
-		project_id: string;
+		tenant_id: string;
 		source: string;
 		correlation_token: string;
 		payload: Record<string, unknown>;
 	},
 ): Promise<InboxRow> {
 	const r = await exec.query<InboxRow>(
-		`INSERT INTO __workflow_inbox (project_id, source, correlation_token, payload)
+		`INSERT INTO __workflow_inbox (tenant_id, source, correlation_token, payload)
 		 VALUES ($1, $2, $3, $4::jsonb)
 		 RETURNING ${SELECT_COLUMNS}`,
 		[
-			input.project_id,
+			input.tenant_id,
 			input.source,
 			input.correlation_token,
 			JSON.stringify(input.payload),
@@ -35,24 +35,24 @@ export async function appendInbox(
 }
 
 /**
- * Claims a batch of unprocessed inbox rows for the project. Uses
+ * Claims a batch of unprocessed inbox rows for the tenant. Uses
  * `FOR UPDATE SKIP LOCKED` so two concurrent correlator workers don't grab
  * the same row. Caller MUST be inside a transaction and either mark them
  * processed or roll back.
  */
 export async function claimUnprocessed(
 	client: pg.PoolClient | pg.Client,
-	project_id: string,
+	tenant_id: string,
 	limit: number = 100,
 ): Promise<InboxRow[]> {
 	const r = await client.query<InboxRow>(
 		`SELECT ${SELECT_COLUMNS} FROM __workflow_inbox
-		  WHERE project_id = $1
+		  WHERE tenant_id = $1
 		    AND processed_at IS NULL
 		  ORDER BY received_at
 		  LIMIT $2
 		  FOR UPDATE SKIP LOCKED`,
-		[project_id, limit],
+		[tenant_id, limit],
 	);
 	return r.rows;
 }

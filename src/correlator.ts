@@ -31,7 +31,7 @@ export interface WorkflowInboxCorrelatorOptions {
 	timezone?: string | null;
 	/** Maximum number of inbox rows claimed per tick. Default: 100. */
 	tickBatchSize?: number;
-	/** Custom name for the registered cron job. Default: `workflow.correlator.<projectId>`. */
+	/** Custom name for the registered cron job. Default: `workflow.correlator.<tenantId>`. */
 	tickName?: string;
 }
 
@@ -57,7 +57,7 @@ const DEFAULT_TICK_EXPRESSION = "* * * * *";
  */
 export class WorkflowInboxCorrelator {
 	readonly cron: Cron;
-	readonly projectId: string;
+	readonly tenantId: string;
 	readonly tickExpression: string;
 	readonly tickName: string;
 
@@ -68,9 +68,9 @@ export class WorkflowInboxCorrelator {
 	constructor(options: WorkflowInboxCorrelatorOptions) {
 		this.cron = options.cron;
 		this.#workflow = options.workflow;
-		this.projectId = options.workflow.projectId;
+		this.tenantId = options.workflow.tenantId;
 		this.tickExpression = options.tickExpression ?? DEFAULT_TICK_EXPRESSION;
-		this.tickName = options.tickName ?? `workflow.correlator.${this.projectId}`;
+		this.tickName = options.tickName ?? `workflow.correlator.${this.tenantId}`;
 		this.#tickBatchSize = options.tickBatchSize ?? 100;
 		this.#timezone = options.timezone;
 	}
@@ -108,7 +108,7 @@ export class WorkflowInboxCorrelator {
 		await withTransaction(this.#workflow.db, async (client) => {
 			const rows = await claimUnprocessed(
 				client,
-				this.projectId,
+				this.tenantId,
 				this.#tickBatchSize,
 			);
 			for (const row of rows) {
@@ -124,7 +124,7 @@ export class WorkflowInboxCorrelator {
 	async #processOne(client: pg.PoolClient, row: InboxRow): Promise<void> {
 		const instance = await findWaitingByCorrelation(
 			client,
-			this.projectId,
+			this.tenantId,
 			row.correlation_token,
 		);
 		if (!instance) {
@@ -150,7 +150,7 @@ export class WorkflowInboxCorrelator {
 					`correlator: matcher "${meta.matcher}" not registered for instance ${instance.id}`,
 				);
 				await appendHistory(client, {
-					project_id: this.projectId,
+					tenant_id: this.tenantId,
 					instance_id: instance.id,
 					event_type: HISTORY_EVENT.SIGNAL_REJECTED,
 					from_node: instance.cursor,
@@ -162,7 +162,7 @@ export class WorkflowInboxCorrelator {
 			try {
 				matched = await matcherFn({
 					instanceId: instance.id,
-					projectId: this.projectId,
+					tenantId: this.tenantId,
 					context: instance.context,
 					signal: row,
 				});
@@ -174,7 +174,7 @@ export class WorkflowInboxCorrelator {
 
 		if (!matched) {
 			await appendHistory(client, {
-				project_id: this.projectId,
+				tenant_id: this.tenantId,
 				instance_id: instance.id,
 				event_type: HISTORY_EVENT.SIGNAL_REJECTED,
 				from_node: instance.cursor,
@@ -185,7 +185,7 @@ export class WorkflowInboxCorrelator {
 		}
 
 		await appendHistory(client, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			instance_id: instance.id,
 			event_type: HISTORY_EVENT.SIGNAL_RECEIVED,
 			from_node: instance.cursor,
@@ -203,7 +203,7 @@ export class WorkflowInboxCorrelator {
 		);
 
 		await this.#workflow.enqueueAdvance(this.#workflow.db, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			instance_id: instance.id,
 			outcome: "MATCHED",
 			outcome_data: row.payload,

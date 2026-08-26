@@ -59,7 +59,7 @@ Deno.test({
 		const wf = new Workflow({
 			db: pool,
 			jobs,
-			projectId: "test-digest",
+			tenantId: "test-digest",
 			definitions: [weeklyDigestV1],
 			handlers,
 		});
@@ -136,7 +136,7 @@ Deno.test({
 		const wf = new Workflow({
 			db: pool,
 			jobs,
-			projectId: "test-digest-fail",
+			tenantId: "test-digest-fail",
 			definitions: [weeklyDigestV1],
 			handlers,
 		});
@@ -212,7 +212,7 @@ Deno.test({
 		const wf = new Workflow({
 			db: pool,
 			jobs,
-			projectId: "test-digest-cron",
+			tenantId: "test-digest-cron",
 			definitions: [weeklyDigestV1],
 			handlers,
 		});
@@ -241,11 +241,11 @@ Deno.test({
 		try {
 			// Wait for cron to fire, workflow.create() to be called, instance to
 			// complete. We don't know the id up-front since the cron created it;
-			// poll the DB for any completed instance in our project.
+			// poll the DB for any completed instance in our tenant.
 			const finalRow = await waitUntil<WorkflowInstanceRow>(async () => {
 				const r = await pool.query<WorkflowInstanceRow>(
 					`SELECT * FROM __workflow_instances
-					  WHERE project_id = 'test-digest-cron'
+					  WHERE tenant_id = 'test-digest-cron'
 					    AND execution_state = 'completed'
 					    AND cursor = '_end_ok'
 					  LIMIT 1`,

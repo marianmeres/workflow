@@ -1,10 +1,10 @@
 import type { FSMConfig, FSMSnapshot } from "@marianmeres/fsm";
 
 /**
- * Default project id used when none is supplied. Mirrors the convention from
+ * Default tenant id used when none is supplied. Mirrors the convention from
  * `@marianmeres/cron`.
  */
-export const DEFAULT_PROJECT_ID = "_default";
+export const DEFAULT_TENANT_ID = "_default";
 
 /** Execution-lifecycle states. Independent of the FSM cursor. */
 export const EXECUTION_STATE = {
@@ -54,7 +54,7 @@ export interface HandlerResult {
 /** Arguments passed to an effectful handler. */
 export interface HandlerArgs {
 	instanceId: string;
-	projectId: string;
+	tenantId: string;
 	context: WorkflowContext;
 	signal?: AbortSignal;
 }
@@ -70,7 +70,7 @@ export type Handler = (args: HandlerArgs) => Promise<HandlerResult> | HandlerRes
 /** Arguments passed to a matcher predicate. */
 export interface MatcherArgs {
 	instanceId: string;
-	projectId: string;
+	tenantId: string;
 	context: WorkflowContext;
 	signal: InboxRow;
 }
@@ -86,7 +86,7 @@ export type Matcher = (args: MatcherArgs) => boolean | Promise<boolean>;
 /** A single row from `__workflow_instances`. Matches the schema 1:1. */
 export interface WorkflowInstanceRow {
 	id: string;
-	project_id: string;
+	tenant_id: string;
 	definition_id: string;
 	definition_version: string;
 	cursor: string;
@@ -102,7 +102,7 @@ export interface WorkflowInstanceRow {
 /** A single row from `__workflow_inbox`. */
 export interface InboxRow {
 	id: string;
-	project_id: string;
+	tenant_id: string;
 	received_at: Date;
 	source: string;
 	correlation_token: string;
@@ -132,7 +132,7 @@ export type HistoryEventType = (typeof HISTORY_EVENT)[keyof typeof HISTORY_EVENT
 /** A single row from `__workflow_history`. */
 export interface HistoryRow {
 	id: number;
-	project_id: string;
+	tenant_id: string;
 	instance_id: string;
 	at: Date;
 	event_type: HistoryEventType;
@@ -149,7 +149,7 @@ export const JOB_TYPE_EFFECT_PREFIX = "workflow.effect.";
 
 /** Payload of a `workflow.advance` job. */
 export interface AdvanceJobPayload {
-	project_id: string;
+	tenant_id: string;
 	instance_id: string;
 	/** Optional outcome label to apply before dispatching. Set when an effect/signal completes. */
 	outcome?: string;
@@ -162,7 +162,7 @@ export interface AdvanceJobPayload {
 
 /** Payload of a `workflow.effect.<handlerName>` job. */
 export interface EffectJobPayload {
-	project_id: string;
+	tenant_id: string;
 	instance_id: string;
 	handler: string;
 	[key: string]: unknown;

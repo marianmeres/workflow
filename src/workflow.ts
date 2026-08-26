@@ -22,7 +22,7 @@ import {
 import { WorkflowRegistry } from "./registry.ts";
 import {
 	type AdvanceJobPayload,
-	DEFAULT_PROJECT_ID,
+	DEFAULT_TENANT_ID,
 	type EffectJobPayload,
 	type Handler,
 	HISTORY_EVENT,
@@ -47,8 +47,8 @@ export interface WorkflowOptions {
 	 * by `type` on the same `__job` table.
 	 */
 	jobs: Jobs;
-	/** Project scope (multi-tenancy). Defaults to `_default`. */
-	projectId?: string;
+	/** Tenant scope (multi-tenancy). Defaults to `_default`. */
+	tenantId?: string;
 	/** Workflow definitions to register. Each is keyed by `(id, version)`. */
 	definitions: WorkflowDefinition[];
 	/** Handlers keyed by name (referenced from `state.meta.handler`). */
@@ -77,7 +77,7 @@ export interface WorkflowOptions {
 export class Workflow implements JobEnqueuer {
 	readonly db: pg.Pool;
 	readonly jobs: Jobs;
-	readonly projectId: string;
+	readonly tenantId: string;
 	readonly registry: WorkflowRegistry;
 
 	readonly #effectMaxAttempts: number;
@@ -86,7 +86,7 @@ export class Workflow implements JobEnqueuer {
 	constructor(options: WorkflowOptions) {
 		this.db = options.db;
 		this.jobs = options.jobs;
-		this.projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+		this.tenantId = options.tenantId ?? DEFAULT_TENANT_ID;
 		this.registry = new WorkflowRegistry({
 			definitions: options.definitions,
 			handlers: options.handlers,
@@ -185,7 +185,7 @@ export class Workflow implements JobEnqueuer {
 			input.definitionVersion,
 		);
 		const row = await createInstance(this.db, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			definition_id: input.definitionId,
 			definition_version: input.definitionVersion,
 			cursor: def.fsm.initial,
@@ -193,23 +193,23 @@ export class Workflow implements JobEnqueuer {
 			correlation_token: input.correlationToken ?? null,
 		});
 		await appendHistory(this.db, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			instance_id: row.id,
 			event_type: HISTORY_EVENT.CREATED,
 			to_node: row.cursor,
 			data: { definitionId: input.definitionId, definitionVersion: input.definitionVersion },
 		});
 		await this.jobs.create(JOB_TYPE_ADVANCE, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			instance_id: row.id,
 		} as AdvanceJobPayload);
 		return row;
 	}
 
-	/** Looks up an instance by id, scoped to this Workflow's project. */
+	/** Looks up an instance by id, scoped to this Workflow's tenant. */
 	async find(id: string): Promise<WorkflowInstanceRow | null> {
 		const row = await findInstance(this.db, id);
-		if (row && row.project_id !== this.projectId) return null;
+		if (row && row.tenant_id !== this.tenantId) return null;
 		return row;
 	}
 
@@ -224,7 +224,7 @@ export class Workflow implements JobEnqueuer {
 		payload: Record<string, unknown>;
 	}): Promise<InboxRow> {
 		return await appendInbox(this.db, {
-			project_id: this.projectId,
+			tenant_id: this.tenantId,
 			source: input.source,
 			correlation_token: input.correlationToken,
 			payload: input.payload,

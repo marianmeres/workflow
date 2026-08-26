@@ -21,6 +21,23 @@ import {
 } from "./types.ts";
 
 /**
+ * Reads the tenant scope off a job payload, tolerating the legacy `project_id`
+ * key used before the 1.1.0 rename.
+ *
+ * Jobs already sitting in the steve queue when a deployment upgrades still
+ * carry the old key. Without this fallback their `tenant_id` would read as
+ * `undefined`, the history insert would violate its NOT NULL constraint, and
+ * the job would retry until it exhausted its attempts.
+ *
+ * Safe to delete once no pre-1.1.0 jobs can remain in any deployed queue.
+ */
+function payloadTenantId(
+	payload: AdvanceJobPayload | EffectJobPayload,
+): string {
+	return (payload.tenant_id ?? payload.project_id) as string;
+}
+
+/**
  * Synthetic event fired by the driver when entering a pure (decision) state,
  * so the user's guarded transitions can route by inspecting context.
  *
@@ -81,7 +98,8 @@ export async function runAdvance(
 	enqueuer: JobEnqueuer,
 	payload: AdvanceJobPayload,
 ): Promise<void> {
-	const { instance_id, project_id, outcome, outcome_data, timeout } = payload;
+	const { instance_id, outcome, outcome_data, timeout } = payload;
+	const tenant_id = payloadTenantId(payload);
 
 	await withTransaction(pool, async (client) => {
 		const row = await lockInstance(client, instance_id);
@@ -132,7 +150,7 @@ export async function runAdvance(
 			);
 			if (result === null) {
 				await appendHistory(client, {
-					project_id,
+					tenant_id,
 					instance_id,
 					event_type: HISTORY_EVENT.TRANSITION_REJECTED,
 					from_node: before,
@@ -151,7 +169,7 @@ export async function runAdvance(
 			// state shape under the user's control; the data is available via the
 			// payload arg to actions/guards.
 			await appendHistory(client, {
-				project_id,
+				tenant_id,
 				instance_id,
 				event_type: timeout ? HISTORY_EVENT.TIMEOUT : HISTORY_EVENT.TRANSITION,
 				from_node: before,
@@ -183,7 +201,7 @@ export async function runAdvance(
 						correlation_token: null,
 					});
 					await appendHistory(client, {
-						project_id,
+						tenant_id,
 						instance_id,
 						event_type: HISTORY_EVENT.COMPLETED,
 						from_node: positioned.state,
@@ -200,12 +218,12 @@ export async function runAdvance(
 						wake_at: null,
 					});
 					await enqueuer.enqueueEffect(client, meta.handler, {
-						project_id,
+						tenant_id,
 						instance_id,
 						handler: meta.handler,
 					});
 					await appendHistory(client, {
-						project_id,
+						tenant_id,
 						instance_id,
 						event_type: HISTORY_EVENT.EFFECT_DISPATCHED,
 						from_node: positioned.state,
@@ -227,7 +245,7 @@ export async function runAdvance(
 						wake_at,
 					});
 					await appendHistory(client, {
-						project_id,
+						tenant_id,
 						instance_id,
 						event_type: HISTORY_EVENT.TRANSITION,
 						from_node: positioned.state,
@@ -240,7 +258,7 @@ export async function runAdvance(
 					const result = positioned.transition(PURE_ENTER_EVENT, undefined, false);
 					if (result === null) {
 						await appendHistory(client, {
-							project_id,
+							tenant_id,
 							instance_id,
 							event_type: HISTORY_EVENT.TRANSITION_REJECTED,
 							from_node: before,
@@ -254,7 +272,7 @@ export async function runAdvance(
 						return;
 					}
 					await appendHistory(client, {
-						project_id,
+						tenant_id,
 						instance_id,
 						event_type: HISTORY_EVENT.TRANSITION,
 						from_node: before,
@@ -293,7 +311,7 @@ async function failInstance(
 		execution_state: EXECUTION_STATE.FAILED,
 	});
 	await appendHistory(client, {
-		project_id: row.project_id,
+		tenant_id: row.tenant_id,
 		instance_id: row.id,
 		event_type: HISTORY_EVENT.FAILED,
 		from_node: row.cursor,
@@ -324,14 +342,15 @@ export async function runEffect(
 	payload: EffectJobPayload,
 	signal?: AbortSignal,
 ): Promise<{ outcome: string; data?: Record<string, unknown> }> {
-	const { instance_id, project_id, handler: handlerName } = payload;
+	const { instance_id, handler: handlerName } = payload;
+	const tenant_id = payloadTenantId(payload);
 	const handler = registry.requireHandler(handlerName);
 
 	const client = await pool.connect();
 	let row: WorkflowInstanceRow | null;
 	try {
 		const r = await client.query<WorkflowInstanceRow>(
-			`SELECT id, project_id, definition_id, definition_version, cursor,
+			`SELECT id, tenant_id, definition_id, definition_version, cursor,
 			        previous_cursor, context, execution_state, wake_at,
 			        correlation_token, created_at, updated_at
 			   FROM __workflow_instances WHERE id = $1`,
@@ -348,13 +367,13 @@ export async function runEffect(
 
 	const result = await handler({
 		instanceId: instance_id,
-		projectId: project_id,
+		tenantId: tenant_id,
 		context: row.context,
 		signal,
 	});
 
 	await enqueuer.enqueueAdvance(pool, {
-		project_id,
+		tenant_id,
 		instance_id,
 		outcome: result.outcome,
 		outcome_data: result.data,
@@ -386,7 +405,7 @@ export async function failEffectJob(
 			execution_state: EXECUTION_STATE.FAILED,
 		});
 		await appendHistory(client, {
-			project_id: row.project_id,
+			tenant_id: row.tenant_id,
 			instance_id: row.id,
 			event_type: HISTORY_EVENT.EFFECT_FAILED,
 			from_node: row.cursor,

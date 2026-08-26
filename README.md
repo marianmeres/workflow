@@ -110,7 +110,7 @@ const cron = new Cron({ db: pool });
 const wf = new Workflow({
     db: pool,
     jobs,
-    projectId: "default",
+    tenantId: "default",
     definitions: [stockReplenishment],
     handlers: {
         checkInventory:  async (args) => ({ outcome: "LOW",       data: { stock: 3 } }),
@@ -175,7 +175,7 @@ await jobs.stop();
 
 The framework owns no runtime processes. It registers job and cron handlers on the `Jobs` and `Cron` instances you pass in; you call `start()` / `stop()` on them. This lets the workflow's jobs/crons coexist with your application's own — they share `__job` / `__cron` tables and coexist by `type` / `name`. Sharing one runtime per process is cheaper than running parallel pollers.
 
-A single steve job type — **`workflow.advance`** — encapsulates one step of the driver. Its payload is `{ project_id, instance_id, outcome?, outcome_data? }`. The handler:
+A single steve job type — **`workflow.advance`** — encapsulates one step of the driver. Its payload is `{ tenant_id, instance_id, outcome?, outcome_data? }`. The handler:
 
 1. Locks the instance row inside a transaction.
 2. If an `outcome` was supplied (wake from effect / signal / timer), applies it via `fsm.transition(outcome, data)`. If the FSM rejects, the instance is marked `failed`.
@@ -216,7 +216,39 @@ const events = await getHistory(pool, instanceId);
 
 ## Multi-tenancy
 
-Pass `projectId` to `Workflow`, `WorkflowScheduler`, and `WorkflowInboxCorrelator`. All three tables (and Cron's internal tables) carry `project_id`. One process can scope workers to a tenant while another scopes to a different tenant; the `FOR UPDATE SKIP LOCKED` claiming keeps them disjoint.
+Pass `tenantId` to `Workflow`, `WorkflowScheduler`, and `WorkflowInboxCorrelator`. All three tables (and Cron's internal tables) carry `tenant_id`. One process can scope workers to a tenant while another scopes to a different tenant; the `FOR UPDATE SKIP LOCKED` claiming keeps them disjoint.
+
+## Breaking changes in 2.0
+
+- **`project_id` renamed to `tenant_id` throughout**, aligning with the
+  ecosystem's tenant-scoping convention (`@marianmeres/cron`,
+  `@marianmeres/steve`). This covers the DB column on all three tables, the
+  `tenant_id` field on `WorkflowInstanceRow` / `InboxRow` / `HistoryRow`, the
+  `tenantId` option on `Workflow` / `WorkflowScheduler` /
+  `WorkflowInboxCorrelator`, the `tenantId` key in `HandlerArgs` / `MatcherArgs`,
+  the `tenant_id` key in `AdvanceJobPayload` / `EffectJobPayload`, and the
+  `DEFAULT_TENANT_ID` export (was `DEFAULT_PROJECT_ID`).
+
+  Run `createMigrate(pool).up("latest")` once on upgrade. Schema version 1.1.0
+  renames the column in place on all three tables, preserving existing data. It
+  is idempotent, and `down("1.0.0")` reverses it.
+
+  Jobs enqueued by 1.0.x carry the old `project_id` key in their steve payload.
+  The driver reads either key, so anything already queued at upgrade time drains
+  normally. That fallback is a transitional shim and will be removed in a later
+  major.
+
+- **Requires `@marianmeres/cron` 3.x**, which performed the same rename on its
+  own tables. If you are upgrading an existing database, run its migration once
+  too — the cron tick registrations otherwise fail against the legacy column:
+
+  ```typescript
+  import { Cron } from "@marianmeres/cron";
+  await Cron.migrate(pool);
+  ```
+
+  Fresh installs need no action. `@marianmeres/steve` 3.x self-heals its own
+  schema on init, so it needs nothing either.
 
 ## API
 

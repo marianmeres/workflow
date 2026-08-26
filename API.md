@@ -50,7 +50,7 @@ new Workflow(options: WorkflowOptions)
 |---|---|---|---|
 | `db` | `pg.Pool` | required | PostgreSQL pool. Used for direct SQL (persistence helpers, transactions). |
 | `jobs` | `Jobs` | required | Externally-owned `steve.Jobs` instance. Workflow registers its handlers on it via `setHandler`. The consumer runs `jobs.start()` / `jobs.stop()`. |
-| `projectId` | `string` | `"_default"` | Multi-tenant scope. |
+| `tenantId` | `string` | `"_default"` | Multi-tenant scope. |
 | `definitions` | `WorkflowDefinition[]` | required | Definitions to register. Validated on construction. |
 | `handlers` | `Record<string, Handler>` | required | Effect handlers keyed by name. |
 | `matchers` | `Record<string, Matcher>` | `{}` | Signal matchers keyed by name. |
@@ -67,7 +67,7 @@ The constructor also subscribes (`jobs.onDone`) to terminal failures of each `wo
 |---|---|---|
 | `db` | `pg.Pool` | The provided pool. |
 | `jobs` | `Jobs` | The injected `Jobs` instance. |
-| `projectId` | `string` | Scope. |
+| `tenantId` | `string` | Scope. |
 | `registry` | `WorkflowRegistry` | Read-only access to definitions/handlers/matchers. |
 
 #### Methods
@@ -87,7 +87,7 @@ Creates a new workflow instance, appends a `created` history entry, and enqueues
 
 ##### `find(id: string): Promise<WorkflowInstanceRow | null>`
 
-Looks up an instance by id, scoped to this Workflow's `projectId`. Returns `null` if not found or scoped to a different project.
+Looks up an instance by id, scoped to this Workflow's `tenantId`. Returns `null` if not found or scoped to a different tenant.
 
 ##### `appendInbox(input): Promise<InboxRow>`
 
@@ -125,11 +125,11 @@ new WorkflowScheduler(options: WorkflowSchedulerOptions)
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `cron` | `Cron` | required | Externally-owned `Cron` instance. Scheduler registers its tick on this via `cron.register`. The consumer runs `cron.start()` / `cron.stop()`. |
-| `workflow` | `Workflow` | required | The Workflow whose instances this scheduler wakes. `projectId` and `db` are derived from it. |
+| `workflow` | `Workflow` | required | The Workflow whose instances this scheduler wakes. `tenantId` and `db` are derived from it. |
 | `tickExpression` | `string` | `"* * * * *"` | 5-field cron expression. |
 | `timezone` | `string \| null` | host local | IANA timezone for the cron expression. |
 | `tickBatchSize` | `number` | `100` | Max rows claimed per tick. |
-| `tickName` | `string` | `workflow.scheduler.<projectId>` | Cron job name. |
+| `tickName` | `string` | `workflow.scheduler.<tenantId>` | Cron job name. |
 
 #### Methods
 
@@ -158,7 +158,7 @@ import { Cron } from "@marianmeres/cron";
 new WorkflowInboxCorrelator(options: WorkflowInboxCorrelatorOptions)
 ```
 
-**`WorkflowInboxCorrelatorOptions`** has the same shape as `WorkflowSchedulerOptions` (cron / workflow / tickExpression / timezone / tickBatchSize / tickName), with `tickName` defaulting to `workflow.correlator.<projectId>`.
+**`WorkflowInboxCorrelatorOptions`** has the same shape as `WorkflowSchedulerOptions` (cron / workflow / tickExpression / timezone / tickBatchSize / tickName), with `tickName` defaulting to `workflow.correlator.<tenantId>`.
 
 #### Methods
 
@@ -176,7 +176,7 @@ For each unprocessed inbox row (claimed via `FOR UPDATE SKIP LOCKED`):
 
 1. Find a `waiting` instance with the same `correlation_token`. None → mark processed, done.
 2. Resolve `meta.matcher` on the instance's current state. Missing matcher (string id) → unregistered matcher → `signal_rejected` history, mark processed.
-3. Run the matcher with `{ instanceId, projectId, context, signal }`.
+3. Run the matcher with `{ instanceId, tenantId, context, signal }`.
 4. Matcher returns `false` → `signal_rejected` history, mark processed.
 5. Matcher returns `true` → `signal_received` history, flip instance to `pending`, mark processed, enqueue advance with `outcome: 'MATCHED'` and `outcome_data: signal.payload`.
 
@@ -347,7 +347,7 @@ type Handler = (args: HandlerArgs) => Promise<HandlerResult> | HandlerResult;
 
 interface HandlerArgs {
     instanceId: string;
-    projectId: string;
+    tenantId: string;
     context: WorkflowContext;
     signal?: AbortSignal;
 }
@@ -373,7 +373,7 @@ type Matcher = (args: MatcherArgs) => boolean | Promise<boolean>;
 
 interface MatcherArgs {
     instanceId: string;
-    projectId: string;
+    tenantId: string;
     context: WorkflowContext;
     signal: InboxRow;
 }
@@ -388,7 +388,7 @@ Matchers are predicate functions referenced from `suspending` node metas. The co
 ```typescript
 interface WorkflowInstanceRow {
     id: string;
-    project_id: string;
+    tenant_id: string;
     definition_id: string;
     definition_version: string;
     cursor: string;                         // current FSM state
@@ -411,7 +411,7 @@ Schema-aligned. `cursor` and `execution_state` are deliberately separate columns
 ```typescript
 interface InboxRow {
     id: string;
-    project_id: string;
+    tenant_id: string;
     received_at: Date;
     source: string;
     correlation_token: string;
@@ -427,7 +427,7 @@ interface InboxRow {
 ```typescript
 interface HistoryRow {
     id: number;
-    project_id: string;
+    tenant_id: string;
     instance_id: string;
     at: Date;
     event_type: HistoryEventType;
@@ -445,7 +445,7 @@ interface HistoryRow {
 
 ```typescript
 interface AdvanceJobPayload {
-    project_id: string;
+    tenant_id: string;
     instance_id: string;
     outcome?: string;
     outcome_data?: Record<string, unknown>;
@@ -453,7 +453,7 @@ interface AdvanceJobPayload {
 }
 
 interface EffectJobPayload {
-    project_id: string;
+    tenant_id: string;
     instance_id: string;
     handler: string;
 }
@@ -512,7 +512,7 @@ const HISTORY_EVENT = {
 
 | Name | Value | Notes |
 |---|---|---|
-| `DEFAULT_PROJECT_ID` | `"_default"` | Used when `projectId` not supplied. Matches `@marianmeres/cron`'s default. |
+| `DEFAULT_TENANT_ID` | `"_default"` | Used when `tenantId` not supplied. Matches `@marianmeres/cron`'s default. |
 | `JOB_TYPE_ADVANCE` | `"workflow.advance"` | Steve job type for one driver step. |
 | `JOB_TYPE_EFFECT_PREFIX` | `"workflow.effect."` | Full type: `workflow.effect.<handlerName>`. |
 | `PURE_ENTER_EVENT` | `"ENTER"` | Synthetic event fired by the driver into pure nodes. Wire guarded transitions on this event. |

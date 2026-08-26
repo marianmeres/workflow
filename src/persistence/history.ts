@@ -3,7 +3,7 @@ import type { HistoryEventType, HistoryRow } from "../types.ts";
 
 type Executor = pg.Pool | pg.PoolClient | pg.Client;
 
-const SELECT_COLUMNS = `id, project_id, instance_id, at, event_type, from_node, to_node, data`;
+const SELECT_COLUMNS = `id, tenant_id, instance_id, at, event_type, from_node, to_node, data`;
 
 /**
  * Appends a single audit row to `__workflow_history`. Accepts a pool, a
@@ -13,7 +13,7 @@ const SELECT_COLUMNS = `id, project_id, instance_id, at, event_type, from_node, 
 export async function appendHistory(
 	exec: Executor,
 	input: {
-		project_id: string;
+		tenant_id: string;
 		instance_id: string;
 		event_type: HistoryEventType;
 		from_node?: string | null;
@@ -23,10 +23,10 @@ export async function appendHistory(
 ): Promise<void> {
 	await exec.query(
 		`INSERT INTO __workflow_history
-			(project_id, instance_id, event_type, from_node, to_node, data)
+			(tenant_id, instance_id, event_type, from_node, to_node, data)
 		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
 		[
-			input.project_id,
+			input.tenant_id,
 			input.instance_id,
 			input.event_type,
 			input.from_node ?? null,

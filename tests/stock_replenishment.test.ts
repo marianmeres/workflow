@@ -35,7 +35,7 @@ async function waitUntil<T>(
 /** Sets up a fresh Workflow + Jobs + Cron triple ready for a test. */
 function setupRuntime(input: {
 	pool: pg.Pool;
-	projectId: string;
+	tenantId: string;
 	scenarios?: Parameters<typeof makeHandlers>[0];
 	effectMaxAttempts?: number;
 }) {
@@ -45,7 +45,7 @@ function setupRuntime(input: {
 	const workflow = new Workflow({
 		db: input.pool,
 		jobs,
-		projectId: input.projectId,
+		tenantId: input.tenantId,
 		definitions: [stockReplenishmentV1],
 		handlers,
 		matchers,
@@ -64,7 +64,7 @@ Deno.test({
 
 		const { jobs, cron, workflow } = setupRuntime({
 			pool,
-			projectId: "test",
+			tenantId: "test",
 		});
 		await jobs.start(2);
 
@@ -146,7 +146,7 @@ Deno.test({
 
 		const { jobs, cron, workflow } = setupRuntime({
 			pool,
-			projectId: "test-timeout",
+			tenantId: "test-timeout",
 		});
 		await jobs.start(2);
 
@@ -195,7 +195,7 @@ Deno.test({
 
 		const { jobs, workflow } = setupRuntime({
 			pool,
-			projectId: "test-fail",
+			tenantId: "test-fail",
 			scenarios: { throwOn: "checkInventory" },
 			effectMaxAttempts: 1,
 		});

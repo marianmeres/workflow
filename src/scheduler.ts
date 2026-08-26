@@ -12,7 +12,7 @@ export interface WorkflowSchedulerOptions {
 	 * The consumer owns the lifecycle: `await cron.start(N)` / `await cron.stop()`.
 	 */
 	cron: Cron;
-	/** The Workflow whose instances this scheduler wakes (used for `db`, `projectId`, `enqueueAdvance`). */
+	/** The Workflow whose instances this scheduler wakes (used for `db`, `tenantId`, `enqueueAdvance`). */
 	workflow: Workflow;
 	/** Cron expression for the tick. Default: every minute. */
 	tickExpression?: string;
@@ -20,7 +20,7 @@ export interface WorkflowSchedulerOptions {
 	timezone?: string | null;
 	/** Maximum number of due rows claimed per tick. Default: 100. */
 	tickBatchSize?: number;
-	/** Custom name for the registered cron job. Default: `workflow.scheduler.<projectId>`. */
+	/** Custom name for the registered cron job. Default: `workflow.scheduler.<tenantId>`. */
 	tickName?: string;
 }
 
@@ -39,7 +39,7 @@ const DEFAULT_TICK_EXPRESSION = "* * * * *";
  */
 export class WorkflowScheduler {
 	readonly cron: Cron;
-	readonly projectId: string;
+	readonly tenantId: string;
 	readonly tickExpression: string;
 	readonly tickName: string;
 
@@ -50,9 +50,9 @@ export class WorkflowScheduler {
 	constructor(options: WorkflowSchedulerOptions) {
 		this.cron = options.cron;
 		this.#workflow = options.workflow;
-		this.projectId = options.workflow.projectId;
+		this.tenantId = options.workflow.tenantId;
 		this.tickExpression = options.tickExpression ?? DEFAULT_TICK_EXPRESSION;
-		this.tickName = options.tickName ?? `workflow.scheduler.${this.projectId}`;
+		this.tickName = options.tickName ?? `workflow.scheduler.${this.tenantId}`;
 		this.#tickBatchSize = options.tickBatchSize ?? 100;
 		this.#timezone = options.timezone;
 	}
@@ -87,7 +87,7 @@ export class WorkflowScheduler {
 	async #tick(): Promise<number> {
 		const claimed = await claimDueWakeUps(
 			this.#workflow.db,
-			this.projectId,
+			this.tenantId,
 			this.#tickBatchSize,
 		);
 		if (claimed.length === 0) return 0;
@@ -96,7 +96,7 @@ export class WorkflowScheduler {
 
 		for (const row of claimed) {
 			const payload: AdvanceJobPayload = {
-				project_id: this.projectId,
+				tenant_id: this.tenantId,
 				instance_id: row.id,
 				timeout: true,
 				outcome: "TIMEOUT",
