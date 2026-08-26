@@ -182,6 +182,12 @@ export interface AdvanceJobPayload {
 	inbox_id?: string;
 	/** Effect handler that produced the outcome. `kind: "effect"` only; for history. */
 	handler?: string;
+	/**
+	 * How many times this payload has been re-dispatched after its job expired
+	 * (i.e. its worker died mid-run — steve never retries those). Bounded by
+	 * `redispatchLimit`; absent on a first dispatch.
+	 */
+	redispatch?: number;
 	[key: string]: unknown;
 }
 
@@ -198,6 +204,11 @@ export interface EffectJobPayload {
 	seq?: number;
 	/** Node that dispatched this effect. Diagnostics only. */
 	cursor?: string;
+	/**
+	 * How many times this payload has been re-dispatched after its job expired.
+	 * See {@link AdvanceJobPayload.redispatch}.
+	 */
+	redispatch?: number;
 	[key: string]: unknown;
 }
 

@@ -56,10 +56,17 @@ new Workflow(options: WorkflowOptions)
 | `matchers` | `Record<string, Matcher>` | `{}` | Signal matchers keyed by name. |
 | `effectMaxAttempts` | `number` | `3` | Max retries for effect handlers (steve `max_attempts`). |
 | `effectMaxAttemptDurationMs` | `number` | `0` | Per-attempt timeout in ms (`0` = none). |
+| `advanceMaxAttempts` | `number` | `10` | Max retries for `workflow.advance` jobs (steve `max_attempts`). Steve's exponential backoff over 10 attempts spans ~17 minutes of database-outage tolerance. |
+| `redispatchLimit` | `number` | `3` | How many times one job payload may be dispatched, counting the original, before an expiry fails the instance. |
 
 Throws on construction if any definition references a handler/matcher not present in the maps, or if any other structural problem is found (unknown transition target, missing terminal state, etc.). See [`validateDefinition`](#validatedefinitiondef-available).
 
-The constructor also subscribes (`jobs.onDone`) to terminal failures of each `workflow.effect.<name>` type and marks the corresponding workflow instance `failed` on `failed` / `expired`.
+The constructor also subscribes (`jobs.onDone`) to the terminal outcomes of `workflow.advance` and of each `workflow.effect.<name>` type:
+
+- **`failed`** (steve exhausted the attempts) — the instance is marked `failed`, with `effect_failed` history for an effect job and `failed` history carrying the last attempt's error message for an advance.
+- **`expired`** (the worker died mid-run; steve never retries those) — the identical payload is re-queued, up to `redispatchLimit` dispatches in total, and only then is the instance failed. A re-dispatch whose original did commit before the crash is fenced out by `seq`, so it costs nothing.
+
+Note that jobs only ever reach `expired` if something reaps them: run the `Jobs` instance with `autoCleanup` or call `jobs.cleanup()` periodically. Without it a crashed worker leaves the instance `running` indefinitely.
 
 #### Properties
 

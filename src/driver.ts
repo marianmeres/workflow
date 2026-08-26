@@ -413,6 +413,7 @@ async function failInstance(
 	client: pg.PoolClient | pg.Client,
 	row: WorkflowInstanceRow,
 	reason: string,
+	extra: Record<string, unknown> = {},
 ): Promise<void> {
 	clog.error?.(`workflow instance ${row.id} failed: ${reason}`);
 	await updateInstance(client, row.id, {
@@ -423,7 +424,42 @@ async function failInstance(
 		instance_id: row.id,
 		event_type: HISTORY_EVENT.FAILED,
 		from_node: row.cursor,
-		data: { reason },
+		data: { reason, ...extra },
+	});
+}
+
+/**
+ * Called by the Workflow layer when steve gives up on an advance job — every
+ * attempt threw, or the job expired once too often to keep re-dispatching it.
+ * Without this the instance would sit in `pending`/`running` with nothing left
+ * that could ever move it.
+ *
+ * Fenced like every other write: an advance that lost the race to a later one
+ * must not fail the instance that later one moved on.
+ */
+export async function failAdvanceJob(
+	pool: pg.Pool,
+	payload: AdvanceJobPayload,
+	reason: string,
+	jobUid?: string,
+): Promise<void> {
+	await withTransaction(pool, async (client) => {
+		const row = await lockInstance(client, payload.instance_id);
+		if (!row) return;
+		if (payload.expected_seq !== undefined && row.seq !== payload.expected_seq) {
+			clog.debug?.(
+				`failAdvanceJob: stale (row.seq=${row.seq}, expected=${payload.expected_seq}); no-op`,
+			);
+			return;
+		}
+		if (
+			row.execution_state === EXECUTION_STATE.COMPLETED ||
+			row.execution_state === EXECUTION_STATE.FAILED ||
+			row.execution_state === EXECUTION_STATE.CANCELLED
+		) {
+			return;
+		}
+		await failInstance(client, row, reason, { job_uid: jobUid ?? null });
 	});
 }
 

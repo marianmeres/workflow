@@ -12,6 +12,7 @@ import {
 	WorkflowScheduler,
 	type AdvanceJobPayload,
 	type EffectJobPayload,
+	type WorkflowDefinition,
 	type WorkflowInstanceRow,
 } from "../src/mod.ts";
 import { failEffectJob, type JobEnqueuer, runAdvance } from "../src/driver.ts";
@@ -378,6 +379,231 @@ Deno.test({
 				return r?.execution_state === EXECUTION_STATE.WAITING ? r : null;
 			});
 			assertEquals(row.cursor, "await_reply");
+		} finally {
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+/** Its first hop throws inside the transition action, on every attempt. */
+const throwingActionV1: WorkflowDefinition = {
+	id: "throwing_action",
+	version: "1.0.0",
+	fsm: {
+		initial: "route",
+		context: () => ({}),
+		states: {
+			route: {
+				meta: { kind: "pure" },
+				on: {
+					ENTER: [{
+						target: "_end_ok",
+						action: () => {
+							throw new Error("action exploded");
+						},
+					}],
+				},
+			},
+			_end_ok: { meta: { kind: "terminal" }, on: {} },
+		},
+	},
+};
+
+Deno.test({
+	name: "advance failure: a throwing action fails the instance with its message",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		const jobs = new Jobs({ db: pool, pollTimeoutMs: 50 });
+		const workflow = new Workflow({
+			db: pool,
+			jobs,
+			tenantId: "advance-fail",
+			definitions: [throwingActionV1],
+			handlers: {},
+			advanceMaxAttempts: 1,
+		});
+
+		try {
+			const inst = await workflow.create({
+				definitionId: "throwing_action",
+				definitionVersion: "1.0.0",
+			});
+			// Only now — an attempt racing create()'s commit would fail on the
+			// not-yet-visible row instead of on the action, and one attempt is all
+			// this job gets.
+			await jobs.start(1);
+
+			await waitUntil(async () => {
+				const r = await workflow.find(inst.id);
+				return r?.execution_state === EXECUTION_STATE.FAILED ? r : null;
+			});
+
+			const failed = (await getHistory(pool, inst.id)).find(
+				(h) => h.event_type === "failed",
+			);
+			assert(failed, "expected a `failed` history row");
+			assert(
+				String(failed.data.reason).includes("action exploded"),
+				`reason does not carry the error: ${failed.data.reason}`,
+			);
+			assert(failed.data.job_uid, "expected the failing job's uid on the row");
+		} finally {
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+/** A Workflow whose one effect (`checkInventory` → OK) completes the instance. */
+function setupOneEffect(
+	pool: pg.Pool,
+	tenantId: string,
+	redispatchLimit?: number,
+) {
+	const jobs = new Jobs({ db: pool, pollTimeoutMs: 50 });
+	const { handlers, matchers } = makeHandlers({ inventory: "OK" });
+	const workflow = new Workflow({
+		db: pool,
+		jobs,
+		tenantId,
+		definitions: [stockReplenishmentV1],
+		handlers,
+		matchers,
+		redispatchLimit,
+	});
+	const reg = new WorkflowRegistry({
+		definitions: [stockReplenishmentV1],
+		handlers,
+		matchers,
+	});
+	return { jobs, workflow, reg };
+}
+
+/**
+ * What a worker dying mid-job leaves behind: a job stuck in `running` that
+ * steve's reaper flips to `expired` — terminal, never retried by steve itself.
+ */
+async function crashRunningJob(
+	pool: pg.Pool,
+	jobs: Jobs,
+	type: string,
+): Promise<number> {
+	const r = await pool.query(
+		`UPDATE __job SET status = 'running', started_at = now() - interval '1 minute'
+		  WHERE type = $1 AND status = 'pending'`,
+		[type],
+	);
+	assertEquals(r.rowCount, 1, `expected exactly one pending ${type} job`);
+	return await jobs.cleanup(0);
+}
+
+const countJobs = async (pool: pg.Pool, type: string) => {
+	const { rows } = await pool.query<{ n: string }>(
+		`SELECT count(*) AS n FROM __job WHERE type = $1`,
+		[type],
+	);
+	return Number(rows[0].n);
+};
+
+const EFFECT_TYPE = "workflow.effect.checkInventory";
+
+Deno.test({
+	name: "expired: a crashed effect job is re-dispatched and the workflow completes",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		const { jobs, workflow, reg } = setupOneEffect(pool, "expire-redispatch");
+
+		try {
+			// Dispatch the effect with no worker running, so the job below is
+			// guaranteed to be the one we crash.
+			const inst = await seedInstance(pool, "expire-redispatch");
+			await runAdvance(pool, reg, workflow, {
+				tenant_id: "expire-redispatch",
+				instance_id: inst.id,
+				kind: "start",
+				expected_seq: inst.seq,
+			});
+			assertEquals(await countJobs(pool, EFFECT_TYPE), 1);
+
+			assertEquals(await crashRunningJob(pool, jobs, EFFECT_TYPE), 1);
+			await waitUntil(() => countJobs(pool, EFFECT_TYPE).then((n) => n === 2));
+
+			const { rows } = await pool.query<{ redispatch: string }>(
+				`SELECT payload->>'redispatch' AS redispatch FROM __job
+				  WHERE type = $1 AND status = 'pending'`,
+				[EFFECT_TYPE],
+			);
+			assertEquals(rows.map((r) => r.redispatch), ["1"]);
+
+			await jobs.start(2);
+			const done = await waitUntil(async () => {
+				const r = await workflow.find(inst.id);
+				return r?.execution_state === EXECUTION_STATE.COMPLETED ? r : null;
+			});
+			assertEquals(done.cursor, "_end_ok");
+
+			const events = (await getHistory(pool, inst.id)).map((h) => h.event_type);
+			assert(
+				!events.includes("effect_failed"),
+				`unexpected failure: ${events.join(", ")}`,
+			);
+		} finally {
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name: "expired: the instance fails once the redispatch budget is spent",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		// Budget of 2 = the original dispatch plus one re-dispatch.
+		const { jobs, workflow, reg } = setupOneEffect(pool, "expire-limit", 2);
+
+		try {
+			const inst = await seedInstance(pool, "expire-limit");
+			await runAdvance(pool, reg, workflow, {
+				tenant_id: "expire-limit",
+				instance_id: inst.id,
+				kind: "start",
+				expected_seq: inst.seq,
+			});
+
+			assertEquals(await crashRunningJob(pool, jobs, EFFECT_TYPE), 1);
+			await waitUntil(() => countJobs(pool, EFFECT_TYPE).then((n) => n === 2));
+
+			assertEquals(await crashRunningJob(pool, jobs, EFFECT_TYPE), 1);
+			const failed = await waitUntil(async () => {
+				const r = await workflow.find(inst.id);
+				return r?.execution_state === EXECUTION_STATE.FAILED ? r : null;
+			});
+			assertEquals(failed.cursor, "detect_low_stock");
+			// Nothing re-queued past the budget.
+			assertEquals(await countJobs(pool, EFFECT_TYPE), 2);
+
+			const event = (await getHistory(pool, inst.id)).find(
+				(h) => h.event_type === "effect_failed",
+			);
+			assert(event, "expected an `effect_failed` history row");
+			assertEquals(event.data.handler, "checkInventory");
+			assert(
+				String(event.data.reason).includes("redispatch limit"),
+				`reason: ${event.data.reason}`,
+			);
 		} finally {
 			await jobs.stop();
 			await pool.end();

@@ -6,6 +6,7 @@ import {
 import type pg from "pg";
 import {
 	effectJobType,
+	failAdvanceJob,
 	failEffectJob,
 	type JobEnqueuer,
 	JOB_TYPE_ADVANCE,
@@ -60,6 +61,28 @@ export interface WorkflowOptions {
 	effectMaxAttempts?: number;
 	/** Per-effect-job timeout in ms. Default: 0 (no limit). */
 	effectMaxAttemptDurationMs?: number;
+	/**
+	 * Per-advance-job retry count. Default: 10 — an advance only fails on a
+	 * throwing guard/action or a database error, and steve's exponential backoff
+	 * over 10 attempts spans ~17 minutes, so a brief outage does not cost an
+	 * instance. When they are exhausted the instance is marked `failed` with the
+	 * last attempt's error message.
+	 */
+	advanceMaxAttempts?: number;
+	/**
+	 * How many times a single job payload may be dispatched, counting the
+	 * original. Default: 3.
+	 *
+	 * An `expired` job is one whose worker died mid-run; steve never retries
+	 * those, so the framework re-queues the identical payload instead. The fence
+	 * (`seq`) makes the re-dispatch a no-op if the dead worker's transaction did
+	 * commit, and handlers are required to be idempotent, so a crash becomes a
+	 * recovery. Once the budget is spent the instance is marked `failed`.
+	 *
+	 * Note that expiry only happens at all when the `Jobs` instance runs with
+	 * `autoCleanup` (or something calls `jobs.cleanup()` periodically).
+	 */
+	redispatchLimit?: number;
 }
 
 /**
@@ -83,6 +106,8 @@ export class Workflow implements JobEnqueuer {
 
 	readonly #effectMaxAttempts: number;
 	readonly #effectMaxAttemptDurationMs: number;
+	readonly #advanceMaxAttempts: number;
+	readonly #redispatchLimit: number;
 
 	constructor(options: WorkflowOptions) {
 		this.db = options.db;
@@ -95,6 +120,8 @@ export class Workflow implements JobEnqueuer {
 		});
 		this.#effectMaxAttempts = options.effectMaxAttempts ?? 3;
 		this.#effectMaxAttemptDurationMs = options.effectMaxAttemptDurationMs ?? 0;
+		this.#advanceMaxAttempts = options.advanceMaxAttempts ?? 10;
+		this.#redispatchLimit = options.redispatchLimit ?? 3;
 
 		// Register the advance handler.
 		this.jobs.setHandler(
@@ -127,22 +154,88 @@ export class Workflow implements JobEnqueuer {
 			);
 		}
 
-		// Watch effect-job terminal failures to mark the workflow instance failed.
-		// onDone fires on completed / failed / expired — we react only to non-success.
+		// Watch job outcomes. onDone fires on completed / failed / expired — we
+		// react only to non-success. `failed` means steve exhausted the attempts,
+		// `expired` means the worker died mid-run and steve will not retry it, so
+		// the two get different treatment: give up vs. re-dispatch.
 		for (const name of handlerNames) {
-			const type = effectJobType(name);
-			this.jobs.onDone(type, (job: Job) => {
-				if (
-					job.status === JOB_STATUS.FAILED ||
-					job.status === JOB_STATUS.EXPIRED
-				) {
-					const payload = job.payload as EffectJobPayload;
+			this.jobs.onDone(effectJobType(name), (job: Job) => {
+				const payload = job.payload as EffectJobPayload;
+				if (job.status === JOB_STATUS.EXPIRED) {
+					this.#redispatchEffect(job, payload).catch(
+						(e) => clog.error?.(`redispatchEffect: ${e}`),
+					);
+				} else if (job.status === JOB_STATUS.FAILED) {
 					failEffectJob(this.db, payload, `steve: ${job.status}`).catch(
 						(e) => clog.error?.(`failEffectJob: ${e}`),
 					);
 				}
 			});
 		}
+
+		this.jobs.onDone(JOB_TYPE_ADVANCE, (job: Job) => {
+			const payload = job.payload as AdvanceJobPayload;
+			if (job.status === JOB_STATUS.EXPIRED) {
+				this.#redispatchAdvance(job, payload).catch(
+					(e) => clog.error?.(`redispatchAdvance: ${e}`),
+				);
+			} else if (job.status === JOB_STATUS.FAILED) {
+				this.#failAdvance(job, payload).catch(
+					(e) => clog.error?.(`failAdvanceJob: ${e}`),
+				);
+			}
+		});
+	}
+
+	/** `redispatch` value for the next dispatch, or `null` if the budget is spent. */
+	#nextRedispatch(current: number | undefined): number | null {
+		const next = (current ?? 0) + 1;
+		return next < this.#redispatchLimit ? next : null;
+	}
+
+	async #redispatchEffect(job: Job, payload: EffectJobPayload): Promise<void> {
+		const next = this.#nextRedispatch(payload.redispatch);
+		if (next === null) {
+			await failEffectJob(
+				this.db,
+				payload,
+				`steve: expired (redispatch limit ${this.#redispatchLimit} reached)`,
+			);
+			return;
+		}
+		clog.debug?.(
+			`effect ${payload.handler} expired; re-dispatch #${next} (job ${job.uid})`,
+		);
+		await this.enqueueEffect(this.db, payload.handler, {
+			...payload,
+			redispatch: next,
+		});
+	}
+
+	async #redispatchAdvance(job: Job, payload: AdvanceJobPayload): Promise<void> {
+		const next = this.#nextRedispatch(payload.redispatch);
+		if (next === null) {
+			await failAdvanceJob(
+				this.db,
+				payload,
+				`advance job expired (redispatch limit ${this.#redispatchLimit} reached)`,
+				job.uid,
+			);
+			return;
+		}
+		clog.debug?.(`advance expired; re-dispatch #${next} (job ${job.uid})`);
+		await this.enqueueAdvance(this.db, { ...payload, redispatch: next });
+	}
+
+	async #failAdvance(job: Job, payload: AdvanceJobPayload): Promise<void> {
+		const { attempts } = await this.jobs.find(job.uid, true);
+		const last = attempts?.at(-1)?.error_message;
+		await failAdvanceJob(
+			this.db,
+			payload,
+			`advance job failed: ${last ?? `steve: ${job.status}`}`,
+			job.uid,
+		);
 	}
 
 	/** Internal — used by the driver to enqueue an advance job. */
@@ -152,8 +245,11 @@ export class Workflow implements JobEnqueuer {
 	): Promise<void> {
 		// Steve creates within its own connection/tx; passing the locked client
 		// would not gain us atomicity vs steve's bookkeeping. The advance is
-		// idempotent (cursor-aware) so an enqueue-but-no-commit race is recoverable.
-		await this.jobs.create(JOB_TYPE_ADVANCE, payload);
+		// fenced (`expected_seq`), so an enqueue-but-no-commit race costs at most
+		// a duplicate job that no-ops.
+		await this.jobs.create(JOB_TYPE_ADVANCE, payload, {
+			max_attempts: this.#advanceMaxAttempts,
+		});
 	}
 
 	/** Internal — used by the driver to enqueue an effect job. */
@@ -213,7 +309,7 @@ export class Workflow implements JobEnqueuer {
 				instance_id: row.id,
 				kind: "start",
 				expected_seq: row.seq,
-			} as AdvanceJobPayload);
+			} as AdvanceJobPayload, { max_attempts: this.#advanceMaxAttempts });
 			return row;
 		});
 	}
