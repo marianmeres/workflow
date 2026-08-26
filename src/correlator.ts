@@ -177,8 +177,8 @@ export class WorkflowInboxCorrelator {
 		);
 
 		// A token no live instance owns is an upstream bug, not something to wait
-		// for. (A completed instance has its token cleared, so it lands here too —
-		// only failed/cancelled ones are still findable.)
+		// for. (A completed or cancelled instance has its token cleared, so it
+		// lands here too — only failed ones are still findable.)
 		if (!instance) {
 			clog.warn?.(
 				`correlator: no live instance for token "${row.correlation_token}" (inbox row ${row.id})`,

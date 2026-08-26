@@ -230,8 +230,8 @@ export async function findByCorrelation(
  * Only consulted when {@link findByCorrelation} misses, to tell "the instance is
  * over" apart from "nobody ever owned this token".
  *
- * Note that a *completed* instance has its token cleared, so in practice this
- * finds the failed/cancelled ones.
+ * Note that a *completed* or *cancelled* instance has its token cleared, so in
+ * practice this finds the failed ones.
  */
 export async function findTerminalByCorrelation(
 	exec: Executor,

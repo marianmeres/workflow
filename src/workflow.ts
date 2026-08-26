@@ -12,13 +12,19 @@ import {
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
 import { appendInbox } from "./persistence/inbox.ts";
-import { createInstance, findInstance } from "./persistence/instances.ts";
+import {
+	createInstance,
+	findInstance,
+	lockInstance,
+	updateInstance,
+} from "./persistence/instances.ts";
 import { withTransaction } from "./persistence/tx.ts";
 import { WorkflowRegistry } from "./registry.ts";
 import {
 	type AdvanceJobPayload,
 	DEFAULT_TENANT_ID,
 	type EffectJobPayload,
+	EXECUTION_STATE,
 	type Handler,
 	HISTORY_EVENT,
 	type InboxRow,
@@ -356,6 +362,98 @@ export class Workflow implements JobEnqueuer {
 			} as AdvanceJobPayload, { max_attempts: this.#advanceMaxAttempts });
 			return row;
 		});
+	}
+
+	/**
+	 * Operator escape hatch: aborts a live instance. The row goes `cancelled`
+	 * (terminal), loses its `wake_at` and its correlation token — so no timer, no
+	 * signal and no queued job can move it again: the `seq` bump makes every job
+	 * already in flight for it stale, and a stale effect job skips its handler
+	 * instead of running the side effect.
+	 *
+	 * Returns `false` when the instance does not exist, belongs to another tenant,
+	 * or is already terminal.
+	 *
+	 * @param reason - free-form, recorded on the `cancelled` history row.
+	 */
+	async cancel(id: string, reason?: string): Promise<boolean> {
+		return await withTransaction(this.db, async (client) => {
+			const row = await lockInstance(client, id);
+			if (!row || row.tenant_id !== this.tenantId) return false;
+			if (
+				row.execution_state === EXECUTION_STATE.COMPLETED ||
+				row.execution_state === EXECUTION_STATE.FAILED ||
+				row.execution_state === EXECUTION_STATE.CANCELLED
+			) {
+				return false;
+			}
+			await updateInstance(client, row.id, {
+				execution_state: EXECUTION_STATE.CANCELLED,
+				wake_at: null,
+				correlation_token: null,
+			}, { bumpSeq: true });
+			await appendHistory(client, {
+				tenant_id: this.tenantId,
+				instance_id: row.id,
+				event_type: HISTORY_EVENT.CANCELLED,
+				from_node: row.cursor,
+				data: { reason: reason ?? null },
+			});
+			return true;
+		});
+	}
+
+	/**
+	 * Operator escape hatch: resumes a `failed` instance from its current cursor,
+	 * rather than starting a new one and replaying every side effect from the top.
+	 * The row goes back to `pending` and a fresh `start` advance re-runs whatever
+	 * the cursor node calls for — typically re-dispatching its effect.
+	 *
+	 * Nothing is fixed by retrying alone: an instance failed by a rejected
+	 * transition or a deterministically throwing handler will fail again unless
+	 * the code changed.
+	 *
+	 * Returns `false` when the instance does not exist, belongs to another tenant,
+	 * or is in a state this does not cover.
+	 *
+	 * @param opts.force - also allow a `running` instance, i.e. the operator
+	 *   asserting that its effect job is dead (a worker crashed with no reaper to
+	 *   expire the job). Safe by construction: the `seq` bump makes the zombie
+	 *   stale, so a late completion is dropped.
+	 */
+	async retry(id: string, opts: { force?: boolean } = {}): Promise<boolean> {
+		const settled = await withTransaction(this.db, async (client) => {
+			const row = await lockInstance(client, id);
+			if (!row || row.tenant_id !== this.tenantId) return null;
+			const allowed = row.execution_state === EXECUTION_STATE.FAILED ||
+				(opts.force === true &&
+					row.execution_state === EXECUTION_STATE.RUNNING);
+			if (!allowed) return null;
+			const updated = await updateInstance(client, row.id, {
+				execution_state: EXECUTION_STATE.PENDING,
+				wake_at: null,
+			}, { bumpSeq: true });
+			await appendHistory(client, {
+				tenant_id: this.tenantId,
+				instance_id: row.id,
+				event_type: HISTORY_EVENT.RETRIED,
+				from_node: row.cursor,
+				data: { from_state: row.execution_state },
+			});
+			return updated;
+		});
+		if (!settled) return false;
+		// After the commit, not inside it: an advance claimed before the commit
+		// landed would see the row still `failed` at the old `seq` and drop itself
+		// as stale. A crash in this gap leaves a `pending` row, which the
+		// scheduler's stale-pending scan re-pokes.
+		await this.enqueueAdvance(this.db, {
+			tenant_id: this.tenantId,
+			instance_id: settled.id,
+			kind: "start",
+			expected_seq: settled.seq,
+		});
+		return true;
 	}
 
 	/** Looks up an instance by id, scoped to this Workflow's tenant. */

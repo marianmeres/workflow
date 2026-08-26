@@ -98,6 +98,20 @@ Creates a new workflow instance, appends a `created` history entry, and enqueues
 
 Looks up an instance by id, scoped to this Workflow's `tenantId`. Returns `null` if not found or scoped to a different tenant.
 
+##### `cancel(id: string, reason?: string): Promise<boolean>`
+
+Operator escape hatch: aborts a live instance. The row goes `cancelled` (terminal), loses its `wake_at` and its correlation token, and gets a `cancelled` history row carrying `reason`. The `seq` bump makes every job already in flight for it stale — a queued effect job resolves as `{ skipped: "stale" }` without calling its handler, and a late completion is dropped.
+
+Returns `false` when the instance does not exist, belongs to another tenant, or is already terminal.
+
+##### `retry(id: string, opts?: { force?: boolean }): Promise<boolean>`
+
+Operator escape hatch: resumes a `failed` instance from its current cursor instead of starting a new one and replaying every side effect from the top. The row goes back to `pending`, gets a `retried` history row carrying `from_state`, and a fresh `start` advance re-runs whatever the cursor node calls for — typically re-dispatching its effect.
+
+`force: true` also allows a `running` instance, i.e. the operator asserting that its effect job is dead (a worker crashed and nothing reaps the job — see `autoCleanup`). Safe by construction: the `seq` bump makes the zombie stale, so a late completion is dropped.
+
+Returns `false` when the instance does not exist, belongs to another tenant, or is in a state this does not cover. Retrying alone fixes nothing: an instance failed by a rejected transition or a deterministically throwing handler fails again unless the code changed.
+
 ##### `appendInbox(input): Promise<InboxRow>`
 
 Appends an external signal to `__workflow_inbox`. The correlator's next tick matches it to a waiting instance, runs the matcher, and (on match) pokes an advance which delivers `MATCHED` with the row's payload and marks the row processed in one transaction. A signal that arrives before its wait point is deferred, not dropped — see [Per-tick behavior](#per-tick-behavior-1).
@@ -591,6 +605,7 @@ const HISTORY_EVENT = {
 	COMPLETED: "completed",
 	FAILED: "failed",
 	CANCELLED: "cancelled",
+	RETRIED: "retried",
 } as const;
 ```
 

@@ -146,6 +146,7 @@ export const HISTORY_EVENT = {
 	COMPLETED: "completed",
 	FAILED: "failed",
 	CANCELLED: "cancelled",
+	RETRIED: "retried",
 } as const;
 
 /** Union of all valid {@link HISTORY_EVENT} string values. */

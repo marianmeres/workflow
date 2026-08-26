@@ -68,6 +68,7 @@ tests/
 ├── fixtures/
 │   ├── stock-replenishment.ts  # reference workflow used by tests only
 │   └── weekly-digest.ts        # recurring-trigger reference workflow
+├── admin.test.ts               # cancel/retry: guards, fencing of in-flight jobs, resume
 ├── correlator.test.ts          # deferral, dedupe, matcher throw/reject, delivery-in-advance
 ├── durability.test.ts          # fence, preconditions, expiry re-dispatch, stale-pending re-poke
 ├── migrations.test.ts          # schema rename/fence up/down + legacy payload drain
@@ -109,7 +110,7 @@ Each FSM state's `meta` field carries a discriminated `NodeMeta`. The driver dis
 
 Two invariants hold the durability story together. Break either one and the failure is silent.
 
-**1. The advance is the only writer of `__workflow_instances`.** Ticks (scheduler, correlator) are read-only: they select what looks actionable and enqueue a `workflow.advance` for it. The advance re-checks the precondition under `SELECT ... FOR UPDATE` and does the write. Consequence: a crash anywhere in a tick costs nothing — whatever made the row look actionable is still true next tick, so the next tick pokes again. A stale or duplicate poke is a debug log, never a history row.
+**1. The advance is the only writer of `__workflow_instances`.** Ticks (scheduler, correlator) are read-only: they select what looks actionable and enqueue a `workflow.advance` for it. The advance re-checks the precondition under `SELECT ... FOR UPDATE` and does the write. Consequence: a crash anywhere in a tick costs nothing — whatever made the row look actionable is still true next tick, so the next tick pokes again. A stale or duplicate poke is a debug log, never a history row. The exceptions are all deliberate settle points outside the driver loop: the job-failure hooks (`failAdvanceJob` / `failEffectJob`) and the `cancel` / `retry` admin calls — each fenced or `seq`-bumping in the same way.
 
 **2. Every settle-point write bumps `seq`; every job carries the `seq` it was issued against.** `expected_seq` on `AdvanceJobPayload`, `seq` on `EffectJobPayload`. On a mismatch the job is dropped:
 
@@ -138,34 +139,34 @@ This is what makes at-least-once job delivery safe. Duplicate deliveries are _ex
 
 ## Public API (from `src/mod.ts`)
 
-| Export                         | Type     | Purpose                                                                                                                                                                     |
-| ------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Workflow`                     | class    | Main driver: attaches handlers to an injected `steve.Jobs`. Exposes `create/find/appendInbox/enqueueAdvance/enqueueEffect`. **No own start/stop** — consumer runs the Jobs. |
-| `WorkflowScheduler`            | class    | Attaches a wake tick to an injected `cron.Cron`. Exposes `register/unregister/tickOnce`. **No own start/stop** — consumer runs the Cron.                                    |
-| `WorkflowInboxCorrelator`      | class    | Attaches a match tick to an injected `cron.Cron`. Exposes `register/unregister/tickOnce`. **No own start/stop** — consumer runs the Cron.                                   |
-| `WorkflowRegistry`             | class    | Immutable registry of definitions + handlers + matchers; validates on construction                                                                                          |
-| `validateDefinition`           | function | Standalone validator usable outside `WorkflowRegistry`                                                                                                                      |
-| `defKey(id, version)`          | function | `"id@version"` registry key helper                                                                                                                                          |
-| `createMigrate(pool)`          | function | Builds `@marianmeres/migrate` instance pre-loaded with schema versions                                                                                                      |
-| `getHistory(exec, id, limit?)` | function | Reads `__workflow_history` rows for an instance (observability)                                                                                                             |
-| `effectJobType(name)`          | function | Steve job-type string for an effect handler: `workflow.effect.<name>`                                                                                                       |
-| `JOB_TYPE_ADVANCE`             | const    | `"workflow.advance"`                                                                                                                                                        |
-| `JOB_TYPE_EFFECT_PREFIX`       | const    | `"workflow.effect."`                                                                                                                                                        |
-| `PURE_ENTER_EVENT`             | const    | `"ENTER"` — synthetic event fired by driver into pure nodes                                                                                                                 |
-| `DEFAULT_TENANT_ID`            | const    | `"_default"`                                                                                                                                                                |
-| `EXECUTION_STATE`              | const    | `{ PENDING, RUNNING, WAITING, COMPLETED, FAILED, CANCELLED }`                                                                                                               |
-| `HISTORY_EVENT`                | const    | Audit event-type strings (`created`, `transition`, `effect_dispatched`, ...)                                                                                                |
-| `NodeMeta`                     | type     | Discriminated union: `pure` \| `effectful` \| `suspending` \| `terminal`                                                                                                    |
-| `AdvanceKind`                  | type     | `"start" \| "effect" \| "timeout" \| "signal"` — what produced an advance; drives its preconditions                                                                         |
-| `SchedulerTickResult`          | type     | `{ woken, repoked }` — what one scheduler tick poked                                                                                                                        |
-| `WorkflowDefinition`           | type     | `{ id, version, fsm: FSMConfig }`                                                                                                                                           |
-| `Handler`                      | type     | `(args: HandlerArgs) => Promise<HandlerResult> \| HandlerResult`                                                                                                            |
-| `Matcher`                      | type     | `(args: MatcherArgs) => boolean \| Promise<boolean>`                                                                                                                        |
-| `WorkflowInstanceRow`          | type     | Schema-aligned row type                                                                                                                                                     |
-| `InboxRow`                     | type     | Schema-aligned row type                                                                                                                                                     |
-| `HistoryRow`                   | type     | Schema-aligned row type                                                                                                                                                     |
-| `WorkflowContext`              | type     | `Record<string, unknown>` — accumulated payload                                                                                                                             |
-| `WorkflowSnapshot`             | type     | `FSMSnapshot<string, WorkflowContext>`                                                                                                                                      |
+| Export                         | Type     | Purpose                                                                                                                                                                                  |
+| ------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Workflow`                     | class    | Main driver: attaches handlers to an injected `steve.Jobs`. Exposes `create/find/cancel/retry/appendInbox/enqueueAdvance/enqueueEffect`. **No own start/stop** — consumer runs the Jobs. |
+| `WorkflowScheduler`            | class    | Attaches a wake tick to an injected `cron.Cron`. Exposes `register/unregister/tickOnce`. **No own start/stop** — consumer runs the Cron.                                                 |
+| `WorkflowInboxCorrelator`      | class    | Attaches a match tick to an injected `cron.Cron`. Exposes `register/unregister/tickOnce`. **No own start/stop** — consumer runs the Cron.                                                |
+| `WorkflowRegistry`             | class    | Immutable registry of definitions + handlers + matchers; validates on construction                                                                                                       |
+| `validateDefinition`           | function | Standalone validator usable outside `WorkflowRegistry`                                                                                                                                   |
+| `defKey(id, version)`          | function | `"id@version"` registry key helper                                                                                                                                                       |
+| `createMigrate(pool)`          | function | Builds `@marianmeres/migrate` instance pre-loaded with schema versions                                                                                                                   |
+| `getHistory(exec, id, limit?)` | function | Reads `__workflow_history` rows for an instance (observability)                                                                                                                          |
+| `effectJobType(name)`          | function | Steve job-type string for an effect handler: `workflow.effect.<name>`                                                                                                                    |
+| `JOB_TYPE_ADVANCE`             | const    | `"workflow.advance"`                                                                                                                                                                     |
+| `JOB_TYPE_EFFECT_PREFIX`       | const    | `"workflow.effect."`                                                                                                                                                                     |
+| `PURE_ENTER_EVENT`             | const    | `"ENTER"` — synthetic event fired by driver into pure nodes                                                                                                                              |
+| `DEFAULT_TENANT_ID`            | const    | `"_default"`                                                                                                                                                                             |
+| `EXECUTION_STATE`              | const    | `{ PENDING, RUNNING, WAITING, COMPLETED, FAILED, CANCELLED }`                                                                                                                            |
+| `HISTORY_EVENT`                | const    | Audit event-type strings (`created`, `transition`, `effect_dispatched`, ...)                                                                                                             |
+| `NodeMeta`                     | type     | Discriminated union: `pure` \| `effectful` \| `suspending` \| `terminal`                                                                                                                 |
+| `AdvanceKind`                  | type     | `"start" \| "effect" \| "timeout" \| "signal"` — what produced an advance; drives its preconditions                                                                                      |
+| `SchedulerTickResult`          | type     | `{ woken, repoked }` — what one scheduler tick poked                                                                                                                                     |
+| `WorkflowDefinition`           | type     | `{ id, version, fsm: FSMConfig }`                                                                                                                                                        |
+| `Handler`                      | type     | `(args: HandlerArgs) => Promise<HandlerResult> \| HandlerResult`                                                                                                                         |
+| `Matcher`                      | type     | `(args: MatcherArgs) => boolean \| Promise<boolean>`                                                                                                                                     |
+| `WorkflowInstanceRow`          | type     | Schema-aligned row type                                                                                                                                                                  |
+| `InboxRow`                     | type     | Schema-aligned row type                                                                                                                                                                  |
+| `HistoryRow`                   | type     | Schema-aligned row type                                                                                                                                                                  |
+| `WorkflowContext`              | type     | `Record<string, unknown>` — accumulated payload                                                                                                                                          |
+| `WorkflowSnapshot`             | type     | `FSMSnapshot<string, WorkflowContext>`                                                                                                                                                   |
 
 See [API.md](./API.md) for full signatures, options, and examples.
 
