@@ -50,7 +50,7 @@ Verify: deno fmt --check
 | ✅     | T06 | —                                       | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)         | [03](./03-definition-and-api.md) #1 | —   |
 | ✅     | T09 | —                                       | `create()` seeds context from `def.fsm.context`, input overlays                                    | [03](./03-definition-and-api.md) #2 | —   |
 | ✅     | T10 | —                                       | Guard: one `Workflow` per `Jobs` (WeakMap + throw) and `detach()`                                  | [03](./03-definition-and-api.md) #3 | —   |
-| ⬜     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | —      |
+| ✅     | T08 | T01                                     | `HandlerResult.correlationToken` applied at the settle-point write                                 | [02](./02-correlation.md) #3     | —      |
 | ⬜     | T17 | T08                                     | Opt-in `HandlerResult.context` shallow patch before the outcome transition                         | [03](./03-definition-and-api.md) #4 | —   |
 | ⬜     | T07 | T01                                     | `cancel(id, reason?)` / `retry(id, { force? })` on `Workflow`; `RETRIED` history event             | [01](./01-durability.md) #4      | —      |
 | ⬜     | T14 | —                                       | Typed `meta`: `WorkflowStateConfig` / `WorkflowFSMConfig`; drop the `as NodeMeta` casts            | [03](./03-definition-and-api.md) #5 | —   |

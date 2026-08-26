@@ -98,12 +98,12 @@ An instance can be at node `await_reply` (cursor) and simultaneously `waiting` (
 
 Each FSM state's `meta` field carries a discriminated `NodeMeta`. The driver dispatches on `meta.kind`:
 
-| Kind         | Driver behavior                                                                                                                                    | Required fields                           |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `pure`       | Auto-fire `ENTER` event; transition by guards. Loop inline until terminal/effectful/suspending. Max 64 hops.                                       | none                                      |
-| `effectful`  | Enqueue `workflow.effect.<handler>` steve job, flip to `running`. On completion, an `advance` is enqueued with `{ outcome, outcome_data }`.        | `handler: string`                         |
-| `suspending` | Set `execution_state='waiting'`, `wake_at` (if `timeoutSec`), keep `correlation_token`. Wakes via scheduler (`TIMEOUT`) or correlator (`MATCHED`). | optional `matcher`, optional `timeoutSec` |
-| `terminal`   | Set `execution_state='completed'`.                                                                                                                 | none                                      |
+| Kind         | Driver behavior                                                                                                                                                                               | Required fields                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `pure`       | Auto-fire `ENTER` event; transition by guards. Loop inline until terminal/effectful/suspending. Max 64 hops.                                                                                  | none                                      |
+| `effectful`  | Enqueue `workflow.effect.<handler>` steve job, flip to `running`. On completion, an `advance` is enqueued with `{ outcome, outcome_data, correlation_token? }`.                               | `handler: string`                         |
+| `suspending` | Set `execution_state='waiting'`, `wake_at` (if `timeoutSec`), keep the `correlation_token` (or the one the last handler returned). Wakes via scheduler (`TIMEOUT`) or correlator (`MATCHED`). | optional `matcher`, optional `timeoutSec` |
+| `terminal`   | Set `execution_state='completed'`.                                                                                                                                                            | none                                      |
 
 ## The Fence and the Poke Model
 

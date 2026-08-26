@@ -49,6 +49,14 @@ export interface WorkflowDefinition<
 export interface HandlerResult {
 	outcome: string;
 	data?: Record<string, unknown>;
+	/**
+	 * Correlation token to put on the instance row, written at the settle point
+	 * this result leads to — so a wait point can key on something that only
+	 * exists once the effect has run (an SMTP `Message-ID`, a payment-provider
+	 * session id). `null` clears the token; omitting the field leaves whatever
+	 * `create({ correlationToken })` set.
+	 */
+	correlationToken?: string | null;
 }
 
 /** Arguments passed to an effectful handler. */
@@ -210,6 +218,12 @@ export interface AdvanceJobPayload {
 	inbox_id?: string;
 	/** Effect handler that produced the outcome. `kind: "effect"` only; for history. */
 	handler?: string;
+	/**
+	 * Correlation token the handler returned ({@link HandlerResult.correlationToken}).
+	 * Written at this advance's settle point; `null` clears the token, absent
+	 * leaves the row's own value alone. `kind: "effect"` only.
+	 */
+	correlation_token?: string | null;
 	/**
 	 * How many times this payload has been re-dispatched after its job expired
 	 * (i.e. its worker died mid-run — steve never retries those). Bounded by

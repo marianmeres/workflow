@@ -87,12 +87,12 @@ Note that jobs only ever reach `expired` if something reaps them: run the `Jobs`
 
 Creates a new workflow instance, appends a `created` history entry, and enqueues the first `workflow.advance` job.
 
-| Field               | Type                         | Description                                                                                                                                                 |
-| ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `definitionId`      | `string`                     | Must be registered.                                                                                                                                         |
-| `definitionVersion` | `string`                     | Must be registered.                                                                                                                                         |
-| `context`           | `WorkflowContext` (optional) | Shallow-merged over the definition's `fsm.context` defaults (top-level keys replace). Default: the defaults alone, or `{}` if the definition declares none. |
-| `correlationToken`  | `string \| null` (optional)  | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing).        |
+| Field               | Type                         | Description                                                                                                                                                                                                                                             |
+| ------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `definitionId`      | `string`                     | Must be registered.                                                                                                                                                                                                                                     |
+| `definitionVersion` | `string`                     | Must be registered.                                                                                                                                                                                                                                     |
+| `context`           | `WorkflowContext` (optional) | Shallow-merged over the definition's `fsm.context` defaults (top-level keys replace). Default: the defaults alone, or `{}` if the definition declares none.                                                                                             |
+| `correlationToken`  | `string \| null` (optional)  | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing). A handler can set or clear it later — see [`HandlerResult`](#handler--handlerargs--handlerresult). |
 
 ##### `find(id: string): Promise<WorkflowInstanceRow | null>`
 
@@ -408,12 +408,15 @@ interface HandlerArgs {
 interface HandlerResult {
 	outcome: string;
 	data?: Record<string, unknown>;
+	correlationToken?: string | null;
 }
 ```
 
 Handlers are async functions referenced by string name from `effectful` node metas. The driver passes the AbortSignal from steve — long-running handlers should observe it for cooperative cancellation.
 
 The returned `outcome` is the FSM event name that drives the next transition. `data` is forwarded as the transition payload (available in guards/actions if the user wires them).
+
+`correlationToken` sets the instance's token, written at the settle point this outcome leads to — so a wait point can key on something that only exists once the effect has run (an SMTP `Message-ID`, a payment-provider session id) and is signallable the moment it becomes `waiting`. `null` clears the token; omitting the field leaves whatever `create({ correlationToken })` set. The value is recorded in the `transition` history row's data.
 
 **Idempotency:** handlers can run multiple times in failure scenarios. Design them accordingly.
 
@@ -511,6 +514,7 @@ interface AdvanceJobPayload {
 	outcome_data?: Record<string, unknown>;
 	inbox_id?: string;
 	handler?: string;
+	correlation_token?: string | null;
 	redispatch?: number;
 }
 
@@ -532,6 +536,7 @@ Steve job payloads. You don't normally construct these directly — `Workflow.cr
 | `expected_seq` / `seq` | The fence: the instance `seq` the job was issued against. The driver drops the job if the locked row has moved past it. On an effect job a row that is _behind_ the fence means the dispatching transaction has not committed yet — the job throws so steve retries. |
 | `inbox_id`             | `kind: "signal"` only. The advance reads the outcome data off that row and marks it processed in the same transaction as the transition.                                                                                                                             |
 | `handler`              | `kind: "effect"` only; used for the `effect_completed` history entry.                                                                                                                                                                                                |
+| `correlation_token`    | `kind: "effect"` only. The token the handler returned; written at this advance's settle point. `null` clears it, absent leaves the row's own value alone.                                                                                                            |
 | `cursor`               | Node that dispatched the effect. Diagnostics only.                                                                                                                                                                                                                   |
 | `redispatch`           | How many times this payload has been re-queued after its job expired. Bounded by `redispatchLimit`; absent on a first dispatch.                                                                                                                                      |
 

@@ -178,6 +178,13 @@ export async function runAdvance(
 			outcome_data = inbox.payload;
 		}
 
+		// A handler may hand back the token its side effect produced (an SMTP
+		// Message-ID, a provider session id). Written at the settle point below,
+		// so it is on the row the moment the instance becomes signallable.
+		const tokenPatch = payload.correlation_token !== undefined
+			? { correlation_token: payload.correlation_token }
+			: {};
+
 		let def;
 		try {
 			def = registry.requireDefinition(row.definition_id, row.definition_version);
@@ -256,7 +263,7 @@ export async function runAdvance(
 					: HISTORY_EVENT.TRANSITION,
 				from_node: before,
 				to_node: positioned.state,
-				data: { outcome, outcome_data },
+				data: { outcome, outcome_data, ...tokenPatch },
 			});
 		}
 
@@ -298,6 +305,7 @@ export async function runAdvance(
 						context: positioned.context as WorkflowContext,
 						execution_state: EXECUTION_STATE.RUNNING,
 						wake_at: null,
+						...tokenPatch,
 					}, { bumpSeq: true });
 					await enqueuer.enqueueEffect(client, meta.handler, {
 						tenant_id,
@@ -319,15 +327,28 @@ export async function runAdvance(
 					const wake_at = meta.timeoutSec
 						? new Date(Date.now() + meta.timeoutSec * 1000)
 						: null;
-					// correlation_token already on the row (set at create-time or by the user
-					// via context). We don't auto-generate one here.
-					await updateInstance(client, instance_id, {
+					// The token is whatever create() set or the handler returned — the
+					// driver never generates one.
+					const settled = await updateInstance(client, instance_id, {
 						cursor: positioned.state,
 						previous_cursor: positioned.previous,
 						context: positioned.context as WorkflowContext,
 						execution_state: EXECUTION_STATE.WAITING,
 						wake_at,
+						...tokenPatch,
 					}, { bumpSeq: true });
+					// Nothing can deliver a signal to a tokenless wait, and the
+					// validator cannot catch it — tokens exist only at runtime.
+					const on = def.fsm.states[positioned.state].on;
+					if (
+						!settled.correlation_token &&
+						(SIGNAL_MATCHED_EVENT in on || "*" in on)
+					) {
+						clog.warn?.(
+							`advance: instance ${instance_id} waits at "${positioned.state}" ` +
+								`with no correlation_token — no signal can reach it`,
+						);
+					}
 					await appendHistory(client, {
 						tenant_id,
 						instance_id,
@@ -535,6 +556,7 @@ export async function runEffect(
 		outcome: result.outcome,
 		outcome_data: result.data,
 		handler: handlerName,
+		correlation_token: result.correlationToken,
 	});
 
 	return { outcome: result.outcome, data: result.data };

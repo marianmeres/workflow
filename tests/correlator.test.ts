@@ -461,6 +461,87 @@ Deno.test({
 });
 
 Deno.test({
+	name: "handler-set correlation token: applied at the settle point, null clears it",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		let release = () => {};
+		const gate = new Promise<void>((r) => (release = r));
+		const { handlers } = makeHandlers();
+		const { jobs, workflow, correlator } = setup({
+			pool,
+			tenantId: "handler-token",
+			handlers: {
+				...handlers,
+				// The Message-ID only exists once the mail has actually been sent.
+				sendOrderEmail: () => ({
+					outcome: "SENT",
+					data: { messageId: "msg-42" },
+					correlationToken: "msg-42",
+				}),
+				aiClassifyReply: () => ({ outcome: "CONFIRMED", correlationToken: null }),
+				persistOrder: async (args) => {
+					await gate;
+					return await handlers.persistOrder(args);
+				},
+			},
+		});
+		await jobs.start(2);
+
+		try {
+			const inst = await workflow.create({
+				definitionId: "stock_replenishment",
+				definitionVersion: "1.0.0",
+			});
+			assertEquals(inst.correlation_token, null);
+
+			const waiting = await waitUntil(async () => {
+				const row = await workflow.find(inst.id);
+				return row?.execution_state === EXECUTION_STATE.WAITING ? row : null;
+			});
+			assertEquals(waiting.cursor, "await_reply");
+			assertEquals(waiting.correlation_token, "msg-42");
+
+			const transition = (await getHistory(pool, inst.id)).find(
+				(h) => h.event_type === "transition" && h.data.outcome === "SENT",
+			);
+			assert(transition, "expected a transition history row for the SENT outcome");
+			assertEquals(transition.data.correlation_token, "msg-42");
+
+			// The wait point is now reachable by the token the handler produced.
+			const signal = await workflow.appendInbox({
+				source: "email",
+				correlationToken: "msg-42",
+				payload: { body: "yes please" },
+			});
+			assertEquals(await correlator.tickOnce(), 1);
+
+			const cleared = await waitUntil(async () => {
+				const row = await workflow.find(inst.id);
+				return row?.cursor === "write_order" ? row : null;
+			});
+			assertEquals(cleared.execution_state, EXECUTION_STATE.RUNNING);
+			assertEquals(cleared.correlation_token, null);
+
+			release();
+			const final = await waitUntil(async () => {
+				const row = await workflow.find(inst.id);
+				return row?.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+			});
+			assertEquals(final.cursor, "_end_ok");
+			assertNotEquals((await inboxRow(pool, signal.id)).processed_at, null);
+		} finally {
+			release();
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
 	name: "no live owner: the row is marked processed on the first tick",
 	ignore: !PG,
 	async fn() {
