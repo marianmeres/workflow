@@ -93,7 +93,12 @@ function setup(input: {
 		handlers: input.handlers ?? base.handlers,
 		matchers: input.matchers ?? base.matchers,
 	});
-	return { jobs, cron, workflow, correlator: new WorkflowInboxCorrelator({ cron, workflow }) };
+	return {
+		jobs,
+		cron,
+		workflow,
+		correlator: new WorkflowInboxCorrelator({ cron, workflow }),
+	};
 }
 
 /**
@@ -431,7 +436,9 @@ Deno.test({
 				tenantId: "matcher-throw",
 				matchers: {
 					matchEmailReply: () => {
-						if (calls++ === 0) throw new Error("simulated transient lookup failure");
+						if (calls++ === 0) {
+							throw new Error("simulated transient lookup failure");
+						}
 						return true;
 					},
 				},

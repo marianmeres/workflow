@@ -11,11 +11,7 @@
  * copy the handler payload into `ctx` so downstream nodes can read it via
  * `args.context`. The driver persists `ctx` after each transition.
  */
-import type {
-	Handler,
-	WorkflowContext,
-	WorkflowDefinition,
-} from "../../src/mod.ts";
+import type { Handler, WorkflowContext, WorkflowDefinition } from "../../src/mod.ts";
 
 interface DigestContext extends WorkflowContext {
 	url?: string;

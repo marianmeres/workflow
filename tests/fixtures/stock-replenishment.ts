@@ -92,22 +92,22 @@ export function makeHandlers(scenarios: {
 	throwOn?: string;
 } = {}): { handlers: Record<string, Handler>; matchers: Record<string, Matcher> } {
 	const handlers: Record<string, Handler> = {
-		checkInventory: async () => {
+		checkInventory: () => {
 			if (scenarios.throwOn === "checkInventory") {
 				throw new Error("simulated checkInventory failure");
 			}
 			return { outcome: scenarios.inventory ?? "LOW", data: { stock: 3 } };
 		},
-		sendOrderEmail: async () => {
+		sendOrderEmail: () => {
 			if (scenarios.throwOn === "sendOrderEmail") {
 				throw new Error("simulated sendOrderEmail failure");
 			}
 			return { outcome: scenarios.send ?? "SENT", data: { messageId: "msg-1" } };
 		},
-		aiClassifyReply: async () => {
+		aiClassifyReply: () => {
 			return { outcome: scenarios.classify ?? "CONFIRMED", data: {} };
 		},
-		persistOrder: async () => {
+		persistOrder: () => {
 			return { outcome: "OK", data: { orderId: "o-1" } };
 		},
 	};

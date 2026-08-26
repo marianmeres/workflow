@@ -3,10 +3,7 @@ import type pg from "pg";
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
 import { lockInboxRow, markProcessed } from "./persistence/inbox.ts";
-import {
-	lockInstance,
-	updateInstance,
-} from "./persistence/instances.ts";
+import { lockInstance, updateInstance } from "./persistence/instances.ts";
 import { withTransaction } from "./persistence/tx.ts";
 import type { WorkflowRegistry } from "./registry.ts";
 import {
@@ -211,7 +208,9 @@ export async function runAdvance(
 			await failInstance(
 				client,
 				row,
-				`Unknown definition ${row.definition_id}@${row.definition_version}: ${String(e)}`,
+				`Unknown definition ${row.definition_id}@${row.definition_version}: ${
+					String(e)
+				}`,
 			);
 			return;
 		}
@@ -363,14 +362,21 @@ export async function runAdvance(
 				}
 				case "pure": {
 					const before = positioned.state;
-					const result = positioned.transition(PURE_ENTER_EVENT, undefined, false);
+					const result = positioned.transition(
+						PURE_ENTER_EVENT,
+						undefined,
+						false,
+					);
 					if (result === null) {
 						await appendHistory(client, {
 							tenant_id,
 							instance_id,
 							event_type: HISTORY_EVENT.TRANSITION_REJECTED,
 							from_node: before,
-							data: { event: PURE_ENTER_EVENT, reason: "no guarded transition matched" },
+							data: {
+								event: PURE_ENTER_EVENT,
+								reason: "no guarded transition matched",
+							},
 						});
 						await failInstance(
 							client,
@@ -394,7 +400,9 @@ export async function runAdvance(
 					await failInstance(
 						client,
 						row,
-						`unknown meta.kind "${String((meta as { kind?: string }).kind)}" at state "${positioned.state}"`,
+						`unknown meta.kind "${
+							String((meta as { kind?: string }).kind)
+						}" at state "${positioned.state}"`,
 					);
 					return;
 				}

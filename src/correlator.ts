@@ -5,10 +5,7 @@ import { SIGNAL_MATCHED_EVENT } from "./driver.ts";
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
 import { claimUnprocessed, markProcessed } from "./persistence/inbox.ts";
-import {
-	findByCorrelation,
-	findTerminalByCorrelation,
-} from "./persistence/instances.ts";
+import { findByCorrelation, findTerminalByCorrelation } from "./persistence/instances.ts";
 import { withTransaction } from "./persistence/tx.ts";
 import {
 	type AdvanceJobPayload,
@@ -219,9 +216,10 @@ export class WorkflowInboxCorrelator {
 			instance.definition_id,
 			instance.definition_version,
 		);
-		const stateCfg = def?.fsm.states[instance.cursor as keyof typeof def.fsm.states] as
-			| (FSMConfig<string, string, WorkflowContext>["states"][string])
-			| undefined;
+		const stateCfg = def?.fsm
+			.states[instance.cursor as keyof typeof def.fsm.states] as
+				| (FSMConfig<string, string, WorkflowContext>["states"][string])
+				| undefined;
 
 		// A node with no MATCHED (or wildcard) edge is not a delivery target:
 		// poking it would make the fsm reject the transition and fail the

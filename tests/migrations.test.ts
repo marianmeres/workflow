@@ -167,7 +167,9 @@ Deno.test({
 			await createMigrate(pool).up("1.1.0");
 			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
 			assert(
-				!(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+				!(await indexes(pool, "__workflow_instances")).includes(
+					STALE_PENDING_IDX,
+				),
 			);
 
 			await createMigrate(pool).up("latest");
@@ -188,7 +190,9 @@ Deno.test({
 			await createMigrate(pool).down("1.1.0");
 			assert(!(await columns(pool, "__workflow_instances")).includes("seq"));
 			assert(
-				!(await indexes(pool, "__workflow_instances")).includes(STALE_PENDING_IDX),
+				!(await indexes(pool, "__workflow_instances")).includes(
+					STALE_PENDING_IDX,
+				),
 			);
 			assert((await columns(pool, "__workflow_instances")).includes("tenant_id"));
 		} finally {

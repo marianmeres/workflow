@@ -11,10 +11,7 @@ import {
 	WorkflowScheduler,
 } from "../src/mod.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
-import {
-	makeHandlers,
-	stockReplenishmentV1,
-} from "./fixtures/stock-replenishment.ts";
+import { makeHandlers, stockReplenishmentV1 } from "./fixtures/stock-replenishment.ts";
 
 const PG = pgConfigured();
 
@@ -82,7 +79,9 @@ Deno.test({
 			// and land in await_reply (execution_state = waiting).
 			await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.WAITING ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.WAITING
+					? row
+					: null;
 			});
 
 			const reread = await workflow.find(inst.id);
@@ -101,7 +100,9 @@ Deno.test({
 
 			const finalRow = await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 			assertEquals(finalRow.cursor, "_end_ok");
 
@@ -161,7 +162,9 @@ Deno.test({
 
 			await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.WAITING ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.WAITING
+					? row
+					: null;
 			});
 
 			// Force wake_at into the past so the scheduler's next tick pokes it.
@@ -174,7 +177,9 @@ Deno.test({
 
 			const finalRow = await waitUntil(async () => {
 				const row = await workflow.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 			assertEquals(finalRow.cursor, "_end_timeout");
 		} finally {
@@ -220,7 +225,7 @@ Deno.test({
 
 Deno.test({
 	name: "validator rejects definitions referencing unregistered handlers",
-	async fn() {
+	fn() {
 		const bad = {
 			id: "bad",
 			version: "1.0.0",

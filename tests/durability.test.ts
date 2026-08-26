@@ -3,24 +3,21 @@ import { Jobs } from "@marianmeres/steve";
 import { assert, assertEquals } from "@std/assert";
 import type pg from "pg";
 import {
+	type AdvanceJobPayload,
 	createMigrate,
+	type EffectJobPayload,
 	EXECUTION_STATE,
 	getHistory,
 	JOB_TYPE_ADVANCE,
 	Workflow,
-	WorkflowRegistry,
-	WorkflowScheduler,
-	type AdvanceJobPayload,
-	type EffectJobPayload,
 	type WorkflowDefinition,
 	type WorkflowInstanceRow,
+	WorkflowRegistry,
+	WorkflowScheduler,
 } from "../src/mod.ts";
 import { failEffectJob, type JobEnqueuer, runAdvance } from "../src/driver.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
-import {
-	makeHandlers,
-	stockReplenishmentV1,
-} from "./fixtures/stock-replenishment.ts";
+import { makeHandlers, stockReplenishmentV1 } from "./fixtures/stock-replenishment.ts";
 
 const PG = pgConfigured();
 

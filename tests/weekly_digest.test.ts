@@ -90,7 +90,9 @@ Deno.test({
 
 			const finalRow = await waitUntil<WorkflowInstanceRow>(async () => {
 				const row = await wf.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 
 			assertEquals(finalRow.cursor, "_end_ok");
@@ -110,7 +112,10 @@ Deno.test({
 			);
 
 			// Final persisted context is also threaded
-			assertEquals(finalRow.context.content, "Hello from xyz.com! Today's top story: ...");
+			assertEquals(
+				finalRow.context.content,
+				"Hello from xyz.com! Today's top story: ...",
+			);
 			assertEquals(finalRow.context.summary, capture.sentEmails[0].body);
 		} finally {
 			await cron.stop();
@@ -151,7 +156,9 @@ Deno.test({
 
 			const finalRow = await waitUntil<WorkflowInstanceRow>(async () => {
 				const row = await wf.find(inst.id);
-				return row && row.execution_state === EXECUTION_STATE.COMPLETED ? row : null;
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
 			});
 
 			// AI returned FAILED → routed to _end_ai_failed. The workflow lifecycle

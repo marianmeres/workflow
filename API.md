@@ -46,18 +46,18 @@ new Workflow(options: WorkflowOptions)
 
 **`WorkflowOptions`:**
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `db` | `pg.Pool` | required | PostgreSQL pool. Used for direct SQL (persistence helpers, transactions). |
-| `jobs` | `Jobs` | required | Externally-owned `steve.Jobs` instance. Workflow registers its handlers on it via `setHandler`. The consumer runs `jobs.start()` / `jobs.stop()`. |
-| `tenantId` | `string` | `"_default"` | Multi-tenant scope. |
-| `definitions` | `WorkflowDefinition[]` | required | Definitions to register. Validated on construction. |
-| `handlers` | `Record<string, Handler>` | required | Effect handlers keyed by name. |
-| `matchers` | `Record<string, Matcher>` | `{}` | Signal matchers keyed by name. |
-| `effectMaxAttempts` | `number` | `3` | Max retries for effect handlers (steve `max_attempts`). |
-| `effectMaxAttemptDurationMs` | `number` | `0` | Per-attempt timeout in ms (`0` = none). |
-| `advanceMaxAttempts` | `number` | `10` | Max retries for `workflow.advance` jobs (steve `max_attempts`). Steve's exponential backoff over 10 attempts spans ~17 minutes of database-outage tolerance. |
-| `redispatchLimit` | `number` | `3` | How many times one job payload may be dispatched, counting the original, before an expiry fails the instance. |
+| Field                        | Type                      | Default      | Description                                                                                                                                                  |
+| ---------------------------- | ------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `db`                         | `pg.Pool`                 | required     | PostgreSQL pool. Used for direct SQL (persistence helpers, transactions).                                                                                    |
+| `jobs`                       | `Jobs`                    | required     | Externally-owned `steve.Jobs` instance. Workflow registers its handlers on it via `setHandler`. The consumer runs `jobs.start()` / `jobs.stop()`.            |
+| `tenantId`                   | `string`                  | `"_default"` | Multi-tenant scope.                                                                                                                                          |
+| `definitions`                | `WorkflowDefinition[]`    | required     | Definitions to register. Validated on construction.                                                                                                          |
+| `handlers`                   | `Record<string, Handler>` | required     | Effect handlers keyed by name.                                                                                                                               |
+| `matchers`                   | `Record<string, Matcher>` | `{}`         | Signal matchers keyed by name.                                                                                                                               |
+| `effectMaxAttempts`          | `number`                  | `3`          | Max retries for effect handlers (steve `max_attempts`).                                                                                                      |
+| `effectMaxAttemptDurationMs` | `number`                  | `0`          | Per-attempt timeout in ms (`0` = none).                                                                                                                      |
+| `advanceMaxAttempts`         | `number`                  | `10`         | Max retries for `workflow.advance` jobs (steve `max_attempts`). Steve's exponential backoff over 10 attempts spans ~17 minutes of database-outage tolerance. |
+| `redispatchLimit`            | `number`                  | `3`          | How many times one job payload may be dispatched, counting the original, before an expiry fails the instance.                                                |
 
 Throws on construction if any definition references a handler/matcher not present in the maps, or if any other structural problem is found (unknown transition target, missing terminal state, etc.). See [`validateDefinition`](#validatedefinitiondef-available).
 
@@ -70,11 +70,11 @@ Note that jobs only ever reach `expired` if something reaps them: run the `Jobs`
 
 #### Properties
 
-| Name | Type | Description |
-|---|---|---|
-| `db` | `pg.Pool` | The provided pool. |
-| `jobs` | `Jobs` | The injected `Jobs` instance. |
-| `tenantId` | `string` | Scope. |
+| Name       | Type               | Description                                        |
+| ---------- | ------------------ | -------------------------------------------------- |
+| `db`       | `pg.Pool`          | The provided pool.                                 |
+| `jobs`     | `Jobs`             | The injected `Jobs` instance.                      |
+| `tenantId` | `string`           | Scope.                                             |
 | `registry` | `WorkflowRegistry` | Read-only access to definitions/handlers/matchers. |
 
 #### Methods
@@ -85,12 +85,12 @@ Note that jobs only ever reach `expired` if something reaps them: run the `Jobs`
 
 Creates a new workflow instance, appends a `created` history entry, and enqueues the first `workflow.advance` job.
 
-| Field | Type | Description |
-|---|---|---|
-| `definitionId` | `string` | Must be registered. |
-| `definitionVersion` | `string` | Must be registered. |
-| `context` | `WorkflowContext` (optional) | Initial context. Default: `{}`. |
-| `correlationToken` | `string \| null` (optional) | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing). |
+| Field               | Type                         | Description                                                                                                                                          |
+| ------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `definitionId`      | `string`                     | Must be registered.                                                                                                                                  |
+| `definitionVersion` | `string`                     | Must be registered.                                                                                                                                  |
+| `context`           | `WorkflowContext` (optional) | Initial context. Default: `{}`.                                                                                                                      |
+| `correlationToken`  | `string \| null` (optional)  | Set up-front for signal-suspending nodes that need to be matchable before the workflow reaches them (e.g. outbound emails using UUID subaddressing). |
 
 ##### `find(id: string): Promise<WorkflowInstanceRow | null>`
 
@@ -100,11 +100,11 @@ Looks up an instance by id, scoped to this Workflow's `tenantId`. Returns `null`
 
 Appends an external signal to `__workflow_inbox`. The correlator's next tick matches it to a waiting instance, runs the matcher, and (on match) pokes an advance which delivers `MATCHED` with the row's payload and marks the row processed in one transaction. A signal that arrives before its wait point is deferred, not dropped — see [Per-tick behavior](#per-tick-behavior-1).
 
-| Field | Type | Description |
-|---|---|---|
-| `source` | `string` | Free-form classifier, e.g. `"email"`, `"webhook"`. |
-| `correlationToken` | `string` | Index key into waiting instances. |
-| `payload` | `Record<string, unknown>` | Signal data, surfaced to the matcher and forwarded to the FSM. |
+| Field              | Type                      | Description                                                    |
+| ------------------ | ------------------------- | -------------------------------------------------------------- |
+| `source`           | `string`                  | Free-form classifier, e.g. `"email"`, `"webhook"`.             |
+| `correlationToken` | `string`                  | Index key into waiting instances.                              |
+| `payload`          | `Record<string, unknown>` | Signal data, surfaced to the matcher and forwarded to the FSM. |
 
 ##### `enqueueAdvance` / `enqueueEffect`
 
@@ -129,30 +129,30 @@ new WorkflowScheduler(options: WorkflowSchedulerOptions)
 
 **`WorkflowSchedulerOptions`:**
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `cron` | `Cron` | required | Externally-owned `Cron` instance. Scheduler registers its tick on this via `cron.register`. The consumer runs `cron.start()` / `cron.stop()`. |
-| `workflow` | `Workflow` | required | The Workflow whose instances this scheduler wakes. `tenantId` and `db` are derived from it. |
-| `tickExpression` | `string` | `"* * * * *"` | 5-field cron expression. |
-| `timezone` | `string \| null` | host local | IANA timezone for the cron expression. |
-| `tickBatchSize` | `number` | `100` | Max rows poked per tick, **per scan**. |
-| `tickName` | `string` | `workflow.scheduler.<tenantId>` | Cron job name. |
-| `stalePendingSec` | `number` | `300` | Age at which a `pending` instance is assumed stranded and re-poked with a fresh `start` advance. Covers the crash window between `create()`'s commit and steve's job insert (separate connection). `0` disables the scan. |
+| Field             | Type             | Default                         | Description                                                                                                                                                                                                               |
+| ----------------- | ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cron`            | `Cron`           | required                        | Externally-owned `Cron` instance. Scheduler registers its tick on this via `cron.register`. The consumer runs `cron.start()` / `cron.stop()`.                                                                             |
+| `workflow`        | `Workflow`       | required                        | The Workflow whose instances this scheduler wakes. `tenantId` and `db` are derived from it.                                                                                                                               |
+| `tickExpression`  | `string`         | `"* * * * *"`                   | 5-field cron expression.                                                                                                                                                                                                  |
+| `timezone`        | `string \| null` | host local                      | IANA timezone for the cron expression.                                                                                                                                                                                    |
+| `tickBatchSize`   | `number`         | `100`                           | Max rows poked per tick, **per scan**.                                                                                                                                                                                    |
+| `tickName`        | `string`         | `workflow.scheduler.<tenantId>` | Cron job name.                                                                                                                                                                                                            |
+| `stalePendingSec` | `number`         | `300`                           | Age at which a `pending` instance is assumed stranded and re-poked with a fresh `start` advance. Covers the crash window between `create()`'s commit and steve's job insert (separate connection). `0` disables the scan. |
 
 #### Methods
 
 > **No `start()` or `stop()`.** The consumer manages the `Cron` lifecycle.
 
-| Method | Description |
-|---|---|
-| `register(): Promise<void>` | Registers the tick on the injected `Cron`. Call once after construction. Idempotent (re-registering preserves `next_run_at`). |
-| `unregister(): Promise<void>` | Removes the tick from the injected `Cron`. |
-| `tickOnce(): Promise<SchedulerTickResult>` | Runs one tick immediately. Exposed for tests and on-demand wakes. |
+| Method                                     | Description                                                                                                                   |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `register(): Promise<void>`                | Registers the tick on the injected `Cron`. Call once after construction. Idempotent (re-registering preserves `next_run_at`). |
+| `unregister(): Promise<void>`              | Removes the tick from the injected `Cron`.                                                                                    |
+| `tickOnce(): Promise<SchedulerTickResult>` | Runs one tick immediately. Exposed for tests and on-demand wakes.                                                             |
 
 ```typescript
 interface SchedulerTickResult {
-    woken: number;    // due `waiting` rows poked with a `timeout` advance
-    repoked: number;  // stranded `pending` rows poked with a `start` advance
+	woken: number; // due `waiting` rows poked with a `timeout` advance
+	repoked: number; // stranded `pending` rows poked with a `start` advance
 }
 ```
 
@@ -163,7 +163,7 @@ Each tick is **read-only** against `__workflow_instances` and runs two scans:
 1. `waiting` rows with `wake_at <= now()` → one `workflow.advance` poke each, `{ kind: 'timeout', outcome: 'TIMEOUT', expected_seq: row.seq }`.
 2. If `stalePendingSec > 0`: `pending` rows older than that → `{ kind: 'start', expected_seq: row.seq }`.
 
-The advance re-checks the precondition under the row lock (including that the timer really is due) and is what writes. So the counts are *pokes issued*, not instances moved, and a row poked but not yet advanced is simply poked again next tick — the fence turns the duplicate into a no-op. Nothing is stranded by a crash mid-tick.
+The advance re-checks the precondition under the row lock (including that the timer really is due) and is what writes. So the counts are _pokes issued_, not instances moved, and a row poked but not yet advanced is simply poked again next tick — the fence turns the duplicate into a no-op. Nothing is stranded by a crash mid-tick.
 
 ---
 
@@ -188,31 +188,31 @@ new WorkflowInboxCorrelator(options: WorkflowInboxCorrelatorOptions)
 
 > **No `start()` or `stop()`.** The consumer manages the `Cron` lifecycle.
 
-| Method | Description |
-|---|---|
-| `register(): Promise<void>` | Registers the tick on the injected `Cron`. Call once after construction. |
-| `unregister(): Promise<void>` | Removes the tick from the injected `Cron`. |
+| Method                        | Description                                                                                                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register(): Promise<void>`   | Registers the tick on the injected `Cron`. Call once after construction.                                                                                    |
+| `unregister(): Promise<void>` | Removes the tick from the injected `Cron`.                                                                                                                  |
 | `tickOnce(): Promise<number>` | Runs one tick immediately. Returns rows **resolved** — poked, rejected, or marked processed. Deferred rows are not counted; they are still there next tick. |
 
 #### Per-tick behavior
 
 Rows are claimed `ORDER BY received_at LIMIT tickBatchSize` with `FOR UPDATE SKIP LOCKED`. For each row, the correlator looks up the **live** (non-terminal) instance owning `correlation_token`:
 
-| Instance | Action |
-|---|---|
-| none, or terminal | mark processed + warn log (plus `signal_rejected` history if a terminal instance is found) |
-| live but not `waiting` | **defer** |
-| `waiting` at a node with no `MATCHED` (or `*`) edge | **defer** |
-| already poked earlier in this tick | **defer** |
-| `waiting`, matcher throws | **defer** (error log) |
-| `waiting`, matcher returns `false` | `signal_rejected` history, mark processed |
-| `waiting`, matcher returns `true` (or no matcher) | poke an advance: `{ kind: 'signal', expected_seq, inbox_id }` |
+| Instance                                            | Action                                                                                     |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| none, or terminal                                   | mark processed + warn log (plus `signal_rejected` history if a terminal instance is found) |
+| live but not `waiting`                              | **defer**                                                                                  |
+| `waiting` at a node with no `MATCHED` (or `*`) edge | **defer**                                                                                  |
+| already poked earlier in this tick                  | **defer**                                                                                  |
+| `waiting`, matcher throws                           | **defer** (error log)                                                                      |
+| `waiting`, matcher returns `false`                  | `signal_rejected` history, mark processed                                                  |
+| `waiting`, matcher returns `true` (or no matcher)   | poke an advance: `{ kind: 'signal', expected_seq, inbox_id }`                              |
 
 **Defer** = leave the row unprocessed and look at it again next tick. An early signal — the instance is still running the step that emits the token, or sits at a timer-only node — is early, not wrong: consuming it would lose it, and delivering it to a node with no `MATCHED` edge would fail the instance.
 
 The correlator **never writes the instance row** and never marks a delivered row processed. The advance does both: it locks the inbox row, reads `outcome_data` off it, transitions, appends `signal_received`, and marks it processed in one transaction. A crashed poke is simply re-poked next tick.
 
-Pokes are enqueued *after* the claiming transaction commits — the advance would otherwise block on the inbox lock this tick still holds.
+Pokes are enqueued _after_ the claiming transaction commits — the advance would otherwise block on the inbox lock this tick still holds.
 
 Two known costs: a deterministically-throwing matcher retries and logs every tick, and a deferred backlog larger than `tickBatchSize` shadows newer rows.
 
@@ -240,15 +240,15 @@ Validates every definition against the registered handler/matcher names. Throws 
 
 #### Methods
 
-| Method | Returns | Description |
-|---|---|---|
-| `getDefinition(id, version)` | `WorkflowDefinition \| undefined` | Lookup. |
-| `requireDefinition(id, version)` | `WorkflowDefinition` | Throws if missing. |
-| `getHandler(name)` | `Handler \| undefined` | Lookup. |
-| `requireHandler(name)` | `Handler` | Throws if missing. |
-| `getMatcher(name)` | `Matcher \| undefined` | Lookup. |
-| `requireMatcher(name)` | `Matcher` | Throws if missing. |
-| `handlerNames()` | `string[]` | All registered handler names. |
+| Method                           | Returns                           | Description                   |
+| -------------------------------- | --------------------------------- | ----------------------------- |
+| `getDefinition(id, version)`     | `WorkflowDefinition \| undefined` | Lookup.                       |
+| `requireDefinition(id, version)` | `WorkflowDefinition`              | Throws if missing.            |
+| `getHandler(name)`               | `Handler \| undefined`            | Lookup.                       |
+| `requireHandler(name)`           | `Handler`                         | Throws if missing.            |
+| `getMatcher(name)`               | `Matcher \| undefined`            | Lookup.                       |
+| `requireMatcher(name)`           | `Matcher`                         | Throws if missing.            |
+| `handlerNames()`                 | `string[]`                        | All registered handler names. |
 
 ---
 
@@ -263,6 +263,7 @@ import { createMigrate } from "@marianmeres/workflow";
 ```
 
 **Parameters:**
+
 - `pool` (`pg.Pool`) — required
 - `options.logger` (`(...args: unknown[]) => void`, optional) — passed through to `Migrate`
 
@@ -284,6 +285,7 @@ Active version is stored in `__workflow_migrations`. `1.0.0` creates `__workflow
 Standalone validator. Throws on the first structural problem.
 
 **Parameters:**
+
 - `def` (`WorkflowDefinition`)
 - `available.handlers` (`ReadonlySet<string>`)
 - `available.matchers` (`ReadonlySet<string>`)
@@ -321,6 +323,7 @@ Builds the steve job-type string for an effect handler.
 Reads the append-only history rows for an instance in chronological order. Useful for `/admin/workflows`-style observability views.
 
 **Parameters:**
+
 - `exec` (`pg.Pool | pg.PoolClient | pg.Client`)
 - `instanceId` (`string`)
 - `limit` (`number`, optional) — Default: `200`
@@ -333,7 +336,7 @@ Reads the append-only history rows for an instance in chronological order. Usefu
 import { getHistory } from "@marianmeres/workflow";
 const events = await getHistory(pool, instance.id);
 for (const e of events) {
-    console.log(e.at.toISOString(), e.event_type, e.from_node, "→", e.to_node);
+	console.log(e.at.toISOString(), e.event_type, e.from_node, "→", e.to_node);
 }
 ```
 
@@ -344,11 +347,12 @@ for (const e of events) {
 ### `WorkflowDefinition`
 
 ```typescript
-type WorkflowDefinition<TState extends string = string, TEvent extends string = string> = {
-    id: string;
-    version: string;
-    fsm: FSMConfig<TState, TEvent, WorkflowContext>;
-};
+type WorkflowDefinition<TState extends string = string, TEvent extends string = string> =
+	{
+		id: string;
+		version: string;
+		fsm: FSMConfig<TState, TEvent, WorkflowContext>;
+	};
 ```
 
 The `fsm` field is a [`@marianmeres/fsm`](https://jsr.io/@marianmeres/fsm) config. Each state config carries `meta: NodeMeta` — the FSM passes it through, the workflow driver dispatches on it.
@@ -359,20 +363,20 @@ The `fsm` field is a [`@marianmeres/fsm`](https://jsr.io/@marianmeres/fsm) confi
 
 ```typescript
 type NodeMeta =
-    | { kind: "pure" }
-    | { kind: "effectful"; handler: string }
-    | { kind: "suspending"; matcher?: string; timeoutSec?: number }
-    | { kind: "terminal" };
+	| { kind: "pure" }
+	| { kind: "effectful"; handler: string }
+	| { kind: "suspending"; matcher?: string; timeoutSec?: number }
+	| { kind: "terminal" };
 ```
 
 Discriminated union of node kinds. The driver dispatches on `kind`:
 
-| Kind | Driver behavior |
-|---|---|
-| `pure` | Auto-fires `ENTER`. User wires guarded transitions. Inline-expands. |
-| `effectful` | Enqueues a steve job for `handler`. Waits for completion. |
+| Kind         | Driver behavior                                                                         |
+| ------------ | --------------------------------------------------------------------------------------- |
+| `pure`       | Auto-fires `ENTER`. User wires guarded transitions. Inline-expands.                     |
+| `effectful`  | Enqueues a steve job for `handler`. Waits for completion.                               |
 | `suspending` | Parks the instance. Wakes on `wake_at` (`TIMEOUT`) or matched inbox signal (`MATCHED`). |
-| `terminal` | Marks instance `completed`. |
+| `terminal`   | Marks instance `completed`.                                                             |
 
 ---
 
@@ -382,15 +386,15 @@ Discriminated union of node kinds. The driver dispatches on `kind`:
 type Handler = (args: HandlerArgs) => Promise<HandlerResult> | HandlerResult;
 
 interface HandlerArgs {
-    instanceId: string;
-    tenantId: string;
-    context: WorkflowContext;
-    signal?: AbortSignal;
+	instanceId: string;
+	tenantId: string;
+	context: WorkflowContext;
+	signal?: AbortSignal;
 }
 
 interface HandlerResult {
-    outcome: string;
-    data?: Record<string, unknown>;
+	outcome: string;
+	data?: Record<string, unknown>;
 }
 ```
 
@@ -408,14 +412,14 @@ The returned `outcome` is the FSM event name that drives the next transition. `d
 type Matcher = (args: MatcherArgs) => boolean | Promise<boolean>;
 
 interface MatcherArgs {
-    instanceId: string;
-    tenantId: string;
-    context: WorkflowContext;
-    signal: InboxRow;
+	instanceId: string;
+	tenantId: string;
+	context: WorkflowContext;
+	signal: InboxRow;
 }
 ```
 
-Matchers are predicate functions referenced from `suspending` node metas. The correlation token alone is just an index lookup — the matcher is the *semantic* gate.
+Matchers are predicate functions referenced from `suspending` node metas. The correlation token alone is just an index lookup — the matcher is the _semantic_ gate.
 
 ---
 
@@ -423,19 +427,19 @@ Matchers are predicate functions referenced from `suspending` node metas. The co
 
 ```typescript
 interface WorkflowInstanceRow {
-    id: string;
-    tenant_id: string;
-    definition_id: string;
-    definition_version: string;
-    cursor: string;                         // current FSM state
-    previous_cursor: string | null;         // feeds FSM.fromSnapshot's snapshot.previous
-    context: WorkflowContext;
-    execution_state: ExecutionState;
-    wake_at: Date | null;
-    correlation_token: string | null;
-    seq: number;                            // fencing token
-    created_at: Date;
-    updated_at: Date;
+	id: string;
+	tenant_id: string;
+	definition_id: string;
+	definition_version: string;
+	cursor: string; // current FSM state
+	previous_cursor: string | null; // feeds FSM.fromSnapshot's snapshot.previous
+	context: WorkflowContext;
+	execution_state: ExecutionState;
+	wake_at: Date | null;
+	correlation_token: string | null;
+	seq: number; // fencing token
+	created_at: Date;
+	updated_at: Date;
 }
 ```
 
@@ -449,13 +453,13 @@ Schema-aligned. `cursor` and `execution_state` are deliberately separate columns
 
 ```typescript
 interface InboxRow {
-    id: string;
-    tenant_id: string;
-    received_at: Date;
-    source: string;
-    correlation_token: string;
-    payload: Record<string, unknown>;
-    processed_at: Date | null;
+	id: string;
+	tenant_id: string;
+	received_at: Date;
+	source: string;
+	correlation_token: string;
+	payload: Record<string, unknown>;
+	processed_at: Date | null;
 }
 ```
 
@@ -465,14 +469,14 @@ interface InboxRow {
 
 ```typescript
 interface HistoryRow {
-    id: number;
-    tenant_id: string;
-    instance_id: string;
-    at: Date;
-    event_type: HistoryEventType;
-    from_node: string | null;
-    to_node: string | null;
-    data: Record<string, unknown>;
+	id: number;
+	tenant_id: string;
+	instance_id: string;
+	at: Date;
+	event_type: HistoryEventType;
+	from_node: string | null;
+	to_node: string | null;
+	data: Record<string, unknown>;
 }
 ```
 
@@ -486,37 +490,37 @@ interface HistoryRow {
 type AdvanceKind = "start" | "effect" | "timeout" | "signal";
 
 interface AdvanceJobPayload {
-    tenant_id: string;
-    instance_id: string;
-    kind?: AdvanceKind;
-    expected_seq?: number;
-    outcome?: string;
-    outcome_data?: Record<string, unknown>;
-    inbox_id?: string;
-    handler?: string;
-    redispatch?: number;
+	tenant_id: string;
+	instance_id: string;
+	kind?: AdvanceKind;
+	expected_seq?: number;
+	outcome?: string;
+	outcome_data?: Record<string, unknown>;
+	inbox_id?: string;
+	handler?: string;
+	redispatch?: number;
 }
 
 interface EffectJobPayload {
-    tenant_id: string;
-    instance_id: string;
-    handler: string;
-    seq?: number;
-    cursor?: string;
-    redispatch?: number;
+	tenant_id: string;
+	instance_id: string;
+	handler: string;
+	seq?: number;
+	cursor?: string;
+	redispatch?: number;
 }
 ```
 
 Steve job payloads. You don't normally construct these directly — `Workflow.create`, the driver and the scheduler/correlator do it for you.
 
-| Field | Meaning |
-|---|---|
-| `kind` | What produced this advance. Selects the precondition the driver checks under the row lock: `start` → `pending`, `effect` → `running`, `signal` → `waiting`, `timeout` → `waiting` **and** a `wake_at` in the past. |
-| `expected_seq` / `seq` | The fence: the instance `seq` the job was issued against. The driver drops the job if the locked row has moved past it. On an effect job a row that is *behind* the fence means the dispatching transaction has not committed yet — the job throws so steve retries. |
-| `inbox_id` | `kind: "signal"` only. The advance reads the outcome data off that row and marks it processed in the same transaction as the transition. |
-| `handler` | `kind: "effect"` only; used for the `effect_completed` history entry. |
-| `cursor` | Node that dispatched the effect. Diagnostics only. |
-| `redispatch` | How many times this payload has been re-queued after its job expired. Bounded by `redispatchLimit`; absent on a first dispatch. |
+| Field                  | Meaning                                                                                                                                                                                                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`                 | What produced this advance. Selects the precondition the driver checks under the row lock: `start` → `pending`, `effect` → `running`, `signal` → `waiting`, `timeout` → `waiting` **and** a `wake_at` in the past.                                                   |
+| `expected_seq` / `seq` | The fence: the instance `seq` the job was issued against. The driver drops the job if the locked row has moved past it. On an effect job a row that is _behind_ the fence means the dispatching transaction has not committed yet — the job throws so steve retries. |
+| `inbox_id`             | `kind: "signal"` only. The advance reads the outcome data off that row and marks it processed in the same transaction as the transition.                                                                                                                             |
+| `handler`              | `kind: "effect"` only; used for the `effect_completed` history entry.                                                                                                                                                                                                |
+| `cursor`               | Node that dispatched the effect. Diagnostics only.                                                                                                                                                                                                                   |
+| `redispatch`           | How many times this payload has been re-queued after its job expired. Bounded by `redispatchLimit`; absent on a first dispatch.                                                                                                                                      |
 
 **Absent `kind` / `expected_seq` / `seq` means unfenced** — a job enqueued by 2.0.x and still queued at upgrade time. The driver infers the kind from the payload shape and skips both the fence and the preconditions rather than swallowing the job. A transitional shim; it will be removed together with the `project_id` fallback in a later major.
 
@@ -524,14 +528,14 @@ Steve job payloads. You don't normally construct these directly — `Workflow.cr
 
 ### Other re-exported types
 
-| Type | Description |
-|---|---|
-| `WorkflowContext` | `Record<string, unknown>` — accumulated payload carried in `__workflow_instances.context` |
-| `WorkflowSnapshot` | `FSMSnapshot<string, WorkflowContext>` — passthrough re-export for convenience |
-| `ExecutionState` | Union of execution-state strings |
-| `HistoryEventType` | Union of history-event-type strings |
-| `AdvanceKind` | `"start" \| "effect" \| "timeout" \| "signal"` — see [job payloads](#advancejobpayload--effectjobpayload) |
-| `SchedulerTickResult` | `{ woken, repoked }` — what one `WorkflowScheduler` tick poked |
+| Type                  | Description                                                                                               |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `WorkflowContext`     | `Record<string, unknown>` — accumulated payload carried in `__workflow_instances.context`                 |
+| `WorkflowSnapshot`    | `FSMSnapshot<string, WorkflowContext>` — passthrough re-export for convenience                            |
+| `ExecutionState`      | Union of execution-state strings                                                                          |
+| `HistoryEventType`    | Union of history-event-type strings                                                                       |
+| `AdvanceKind`         | `"start" \| "effect" \| "timeout" \| "signal"` — see [job payloads](#advancejobpayload--effectjobpayload) |
+| `SchedulerTickResult` | `{ woken, repoked }` — what one `WorkflowScheduler` tick poked                                            |
 
 ---
 
@@ -541,12 +545,12 @@ Steve job payloads. You don't normally construct these directly — `Workflow.cr
 
 ```typescript
 const EXECUTION_STATE = {
-    PENDING:   "pending",
-    RUNNING:   "running",
-    WAITING:   "waiting",
-    COMPLETED: "completed",
-    FAILED:    "failed",
-    CANCELLED: "cancelled",
+	PENDING: "pending",
+	RUNNING: "running",
+	WAITING: "waiting",
+	COMPLETED: "completed",
+	FAILED: "failed",
+	CANCELLED: "cancelled",
 } as const;
 ```
 
@@ -554,29 +558,29 @@ const EXECUTION_STATE = {
 
 ```typescript
 const HISTORY_EVENT = {
-    CREATED:             "created",
-    TRANSITION:          "transition",
-    EFFECT_DISPATCHED:   "effect_dispatched",
-    EFFECT_COMPLETED:    "effect_completed",
-    EFFECT_FAILED:       "effect_failed",
-    SIGNAL_RECEIVED:     "signal_received",
-    SIGNAL_REJECTED:     "signal_rejected",
-    TIMEOUT:             "timeout",
-    TRANSITION_REJECTED: "transition_rejected",
-    COMPLETED:           "completed",
-    FAILED:              "failed",
-    CANCELLED:           "cancelled",
+	CREATED: "created",
+	TRANSITION: "transition",
+	EFFECT_DISPATCHED: "effect_dispatched",
+	EFFECT_COMPLETED: "effect_completed",
+	EFFECT_FAILED: "effect_failed",
+	SIGNAL_RECEIVED: "signal_received",
+	SIGNAL_REJECTED: "signal_rejected",
+	TIMEOUT: "timeout",
+	TRANSITION_REJECTED: "transition_rejected",
+	COMPLETED: "completed",
+	FAILED: "failed",
+	CANCELLED: "cancelled",
 } as const;
 ```
 
 ### Misc
 
-| Name | Value | Notes |
-|---|---|---|
-| `DEFAULT_TENANT_ID` | `"_default"` | Used when `tenantId` not supplied. Matches `@marianmeres/cron`'s default. |
-| `JOB_TYPE_ADVANCE` | `"workflow.advance"` | Steve job type for one driver step. |
-| `JOB_TYPE_EFFECT_PREFIX` | `"workflow.effect."` | Full type: `workflow.effect.<handlerName>`. |
-| `PURE_ENTER_EVENT` | `"ENTER"` | Synthetic event fired by the driver into pure nodes. Wire guarded transitions on this event. |
+| Name                     | Value                | Notes                                                                                        |
+| ------------------------ | -------------------- | -------------------------------------------------------------------------------------------- |
+| `DEFAULT_TENANT_ID`      | `"_default"`         | Used when `tenantId` not supplied. Matches `@marianmeres/cron`'s default.                    |
+| `JOB_TYPE_ADVANCE`       | `"workflow.advance"` | Steve job type for one driver step.                                                          |
+| `JOB_TYPE_EFFECT_PREFIX` | `"workflow.effect."` | Full type: `workflow.effect.<handlerName>`.                                                  |
+| `PURE_ENTER_EVENT`       | `"ENTER"`            | Synthetic event fired by the driver into pure nodes. Wire guarded transitions on this event. |
 
 ---
 
