@@ -7,6 +7,7 @@ import {
 	weeklyDigestV1,
 } from "./fixtures/weekly-digest.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
+import { waitUntil } from "./_util.ts";
 import type pg from "pg";
 
 const columns = async (pool: pg.Pool, table: string): Promise<string[]> => {
@@ -28,19 +29,6 @@ const indexes = async (pool: pg.Pool, table: string): Promise<string[]> => {
 const TABLES = ["__workflow_instances", "__workflow_inbox", "__workflow_history"];
 
 const STALE_PENDING_IDX = "__workflow_instances_stale_pending_idx";
-
-async function waitUntil<T>(
-	predicate: () => Promise<T | null | undefined | false>,
-	{ timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const v = await predicate();
-		if (v) return v as T;
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-	throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-}
 
 Deno.test({
 	name: "migration 1.1.0: renames project_id -> tenant_id, preserving data",

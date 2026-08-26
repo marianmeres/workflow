@@ -16,6 +16,7 @@ import {
 } from "../src/mod.ts";
 import { type JobEnqueuer, runAdvance } from "../src/driver.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
+import { waitUntil } from "./_util.ts";
 import {
 	makeHandlers,
 	stockReplenishmentCooldownV1,
@@ -23,19 +24,6 @@ import {
 } from "./fixtures/stock-replenishment.ts";
 
 const PG = pgConfigured();
-
-async function waitUntil<T>(
-	predicate: () => Promise<T | null | undefined | false>,
-	{ timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const v = await predicate();
-		if (v) return v as T;
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-	throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-}
 
 /** Records what the driver would enqueue instead of touching steve. */
 function recordingEnqueuer() {

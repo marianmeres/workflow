@@ -45,7 +45,7 @@ Verify: deno fmt --check
 | Status | ID  | Deps                                    | Task                                                                                               | Source                           | Commit |
 | ------ | --- | --------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------- | ------ |
 | ✅     | T15 | —                                       | `deno fmt` + `deno lint` clean; `deno task check`; `fmt.exclude` for this tracker                   | [04](./04-docs-tests-ops.md) #4  | —      |
-| ⬜     | T13 | —                                       | `tests/driver.test.ts`: pure routing, hop guard, rejections, unknown definition; `tests/_util.ts`   | [04](./04-docs-tests-ops.md) #3  | —      |
+| ✅     | T13 | —                                       | `tests/driver.test.ts`: pure routing, hop guard, rejections, unknown definition; `tests/_util.ts`   | [04](./04-docs-tests-ops.md) #3  | —      |
 | ⬜     | T12 | —                                       | Migration 1.1.0 guard: `table_schema = current_schema()`                                           | [04](./04-docs-tests-ops.md) #2  | —      |
 | ⬜     | T06 | —                                       | Validator: reject definitions that must fail at runtime (ENTER/TIMEOUT/MATCHED/empty `on`)         | [03](./03-definition-and-api.md) #1 | —   |
 | ⬜     | T09 | —                                       | `create()` seeds context from `def.fsm.context`, input overlays                                    | [03](./03-definition-and-api.md) #2 | —   |

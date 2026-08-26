@@ -11,23 +11,10 @@ import {
 	WorkflowScheduler,
 } from "../src/mod.ts";
 import { createPg, pgConfigured, resetSchema } from "./_pg.ts";
+import { waitUntil } from "./_util.ts";
 import { makeHandlers, stockReplenishmentV1 } from "./fixtures/stock-replenishment.ts";
 
 const PG = pgConfigured();
-
-/** Polls `predicate` every `intervalMs` until truthy or `timeoutMs` elapses. */
-async function waitUntil<T>(
-	predicate: () => Promise<T | null | undefined | false>,
-	{ timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const v = await predicate();
-		if (v) return v as T;
-		await new Promise((r) => setTimeout(r, intervalMs));
-	}
-	throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-}
 
 /** Sets up a fresh Workflow + Jobs + Cron triple ready for a test. */
 function setupRuntime(input: {
