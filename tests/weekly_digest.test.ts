@@ -25,6 +25,8 @@ import { waitUntil } from "./_util.ts";
 import {
 	makeDigestCapture,
 	makeDigestHandlers,
+	makeDigestHandlersViaContext,
+	weeklyDigestNoActionsV1,
 	weeklyDigestV1,
 } from "./fixtures/weekly-digest.ts";
 
@@ -107,6 +109,63 @@ Deno.test({
 			assertEquals(finalRow.context.summary, capture.sentEmails[0].body);
 		} finally {
 			await cron.stop();
+			await jobs.stop();
+			await pool.end();
+		}
+	},
+});
+
+Deno.test({
+	name: "weekly digest without fsm actions: HandlerResult.context threads the data",
+	ignore: !PG,
+	async fn() {
+		const pool = createPg();
+		await resetSchema(pool);
+		await createMigrate(pool).up("latest");
+
+		const capture = makeDigestCapture();
+		const jobs = new Jobs({ db: pool, pollTimeoutMs: 50 });
+
+		const wf = new Workflow({
+			db: pool,
+			jobs,
+			tenantId: "test-digest-ctx",
+			definitions: [weeklyDigestNoActionsV1],
+			handlers: makeDigestHandlersViaContext(capture),
+		});
+
+		await jobs.start(2);
+
+		try {
+			const inst = await wf.create({
+				definitionId: "weekly_digest_no_actions",
+				definitionVersion: "1.0.0",
+			});
+
+			const finalRow = await waitUntil<WorkflowInstanceRow>(async () => {
+				const row = await wf.find(inst.id);
+				return row && row.execution_state === EXECUTION_STATE.COMPLETED
+					? row
+					: null;
+			});
+
+			// Reaching _end_ok (rather than _end_unmerged) is the guard on the DONE
+			// edge confirming it saw `summary` — merged before the transition, not
+			// after it.
+			assertEquals(finalRow.cursor, "_end_ok");
+
+			// Same final context as the action-threaded fixture.
+			assertEquals(
+				finalRow.context.content,
+				"Hello from xyz.com! Today's top story: ...",
+			);
+			assertEquals(
+				finalRow.context.summary,
+				"Summary of: Hello from xyz.com! Today's top story: ...",
+			);
+			assertEquals(capture.sentEmails.length, 1);
+			assertEquals(capture.sentEmails[0].body, finalRow.context.summary);
+		} finally {
 			await jobs.stop();
 			await pool.end();
 		}

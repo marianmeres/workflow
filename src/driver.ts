@@ -200,11 +200,15 @@ export async function runAdvance(
 		}
 
 		// Construct the FSM at the saved cursor. fromSnapshot skips onEnter
-		// (a resume is not entry) and preserves previous.
+		// (a resume is not entry) and preserves previous. A handler's context
+		// patch goes in here, before the outcome is applied, so guards and
+		// actions on the outcome edge already see it.
 		const positioned = FSM.fromSnapshot(def.fsm, {
 			state: row.cursor,
 			previous: row.previous_cursor,
-			context: row.context,
+			context: payload.context_patch
+				? { ...row.context, ...payload.context_patch }
+				: row.context,
 		});
 
 		// If an outcome was supplied, apply it. This is the wake-up after an effect
@@ -231,11 +235,10 @@ export async function runAdvance(
 				);
 				return;
 			}
-			// Optionally merge outcome_data into context here. Convention: handlers
-			// return `{ outcome, data }` and the data is the payload — fsm action
-			// hooks merge it if the user wires them. We don't auto-merge to keep
-			// state shape under the user's control; the data is available via the
-			// payload arg to actions/guards.
+			// `outcome_data` stays the fsm payload and is never auto-merged: what
+			// lands in the context is either an fsm action hook the user wired, or
+			// what the handler explicitly returned in `HandlerResult.context`
+			// (merged above).
 			if (kind === "effect" && payload.handler) {
 				await appendHistory(client, {
 					tenant_id,
@@ -557,6 +560,7 @@ export async function runEffect(
 		outcome_data: result.data,
 		handler: handlerName,
 		correlation_token: result.correlationToken,
+		context_patch: result.context,
 	});
 
 	return { outcome: result.outcome, data: result.data };

@@ -57,6 +57,15 @@ export interface HandlerResult {
 	 * `create({ correlationToken })` set.
 	 */
 	correlationToken?: string | null;
+	/**
+	 * Shallow patch for the instance context, applied before the outcome
+	 * transition — so guards and actions on the outcome edge already see it, and
+	 * it is persisted at the settle point. Top-level keys replace.
+	 *
+	 * Opt-in on purpose: `data` alone is the fsm payload and never reaches the
+	 * context, so the persisted shape stays a per-handler choice.
+	 */
+	context?: Partial<WorkflowContext>;
 }
 
 /** Arguments passed to an effectful handler. */
@@ -224,6 +233,12 @@ export interface AdvanceJobPayload {
 	 * leaves the row's own value alone. `kind: "effect"` only.
 	 */
 	correlation_token?: string | null;
+	/**
+	 * Shallow context patch the handler returned ({@link HandlerResult.context}).
+	 * Merged into the instance context before the outcome is applied.
+	 * `kind: "effect"` only.
+	 */
+	context_patch?: Partial<WorkflowContext>;
 	/**
 	 * How many times this payload has been re-dispatched after its job expired
 	 * (i.e. its worker died mid-run — steve never retries those). Bounded by

@@ -242,7 +242,7 @@ Rule: one `Jobs` and one `Cron` per process, and every process that _starts_ the
 
 ## Critical Conventions
 
-1. **Definitions are pure data.** Handlers and matchers are referenced by string name. Never store function pointers in a definition. Litmus test: `JSON.stringify(def)` must lose no meaning.
+1. **Definitions are pure data.** Handlers and matchers are referenced by string name. Never store function pointers in a definition. Litmus test: `JSON.stringify(def)` must lose no meaning. Threading a handler's output into the context needs no `action` hook either — the handler returns `HandlerResult.context`, a shallow patch merged before the outcome transition.
 2. **Version-pin instances.** Every instance carries `(definition_id, definition_version)`. Never edit an in-use definition in place — bump the version. Old versions stay registered until the last instance using them completes.
 3. **Handlers must be idempotent.** The `seq` fence protects the instance row, not the outside world: a worker that finished the side effect and died before steve recorded the attempt gets retried, and the retry is _not_ stale (the instance never left that `seq`). Side effects must be safe to repeat.
 4. **No fsm `onEnter`/`onExit` hooks for side effects.** Driver re-constructs FSMs via `FSM.fromSnapshot()`, which skips `onEnter`. Side effects belong in effectful handlers — they're the only way to get durable, retryable, observable execution.

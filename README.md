@@ -39,7 +39,7 @@ Each FSM state declares its **node kind** via `meta`:
 | `suspending` | Park the instance (`waiting`). Wake on `wake_at` (`TIMEOUT`) or matched inbox signal (`MATCHED`). |
 | `terminal`   | Mark instance `completed`.                                                                        |
 
-The user's handler returns `{ outcome, data }`. The driver calls `fsm.transition(outcome, data)`. The transition table picks the next state. There is no AI nondeterminism inside the FSM logic — return a label, look up the next node.
+The user's handler returns `{ outcome, data }`. The driver calls `fsm.transition(outcome, data)`. The transition table picks the next state. `data` is the transition payload only; a handler that wants a value kept for later nodes returns it in `context` — a shallow patch merged before the transition. There is no AI nondeterminism inside the FSM logic — return a label, look up the next node.
 
 ## Example
 

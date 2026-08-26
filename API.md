@@ -409,12 +409,15 @@ interface HandlerResult {
 	outcome: string;
 	data?: Record<string, unknown>;
 	correlationToken?: string | null;
+	context?: Partial<WorkflowContext>;
 }
 ```
 
 Handlers are async functions referenced by string name from `effectful` node metas. The driver passes the AbortSignal from steve — long-running handlers should observe it for cooperative cancellation.
 
 The returned `outcome` is the FSM event name that drives the next transition. `data` is forwarded as the transition payload (available in guards/actions if the user wires them).
+
+`context` is a shallow patch (top-level keys replace) merged into the instance context _before_ the outcome transition is applied, so guards and actions on the outcome edge already see it and it is persisted at the next settle point. `data` is never merged automatically — a handler that wants a value kept for later nodes returns it in `context`, instead of an fsm `action` that copies it out of the payload.
 
 `correlationToken` sets the instance's token, written at the settle point this outcome leads to — so a wait point can key on something that only exists once the effect has run (an SMTP `Message-ID`, a payment-provider session id) and is signallable the moment it becomes `waiting`. `null` clears the token; omitting the field leaves whatever `create({ correlationToken })` set. The value is recorded in the `transition` history row's data.
 
