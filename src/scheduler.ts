@@ -6,7 +6,7 @@ import {
 	selectStalePending,
 } from "./persistence/instances.ts";
 import type { Workflow } from "./workflow.ts";
-import type { AdvanceJobPayload } from "./types.ts";
+import { type AdvanceJobPayload, TIMEOUT_EVENT } from "./types.ts";
 
 /** Options accepted by {@link WorkflowScheduler}. */
 export interface WorkflowSchedulerOptions {
@@ -122,7 +122,7 @@ export class WorkflowScheduler {
 			this.#tickBatchSize,
 		);
 		for (const row of due) {
-			await this.#poke(row, { kind: "timeout", outcome: "TIMEOUT" });
+			await this.#poke(row, { kind: "timeout", outcome: TIMEOUT_EVENT });
 		}
 		if (due.length) clog.debug?.(`scheduler: poked ${due.length} due wake-ups`);
 

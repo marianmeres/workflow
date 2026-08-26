@@ -299,6 +299,11 @@ Checks performed:
 - Every `suspending` state's matcher (if present) is in `available.matchers`.
 - Every transition target resolves to a defined state.
 - At least one `terminal` state exists.
+- Every node has an edge for the events it is guaranteed to receive — each of these would otherwise be rejected by the FSM at runtime, failing the instance after any side effect at that node had already run:
+  - `pure` → an `ENTER` (or `*`) transition.
+  - `effectful` → at least one transition, or every handler outcome is rejected.
+  - `suspending` → a `MATCHED` (or `*`) transition when `meta.matcher` is set; a `TIMEOUT` (or `*`) one when `meta.timeoutSec` is set; and at least one of the two, or the node can never wake. `timeoutSec`, when present, must be a finite number greater than `0`.
+  - `terminal` → no transitions at all.
 
 ---
 

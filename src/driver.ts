@@ -16,6 +16,8 @@ import {
 	JOB_TYPE_ADVANCE,
 	JOB_TYPE_EFFECT_PREFIX,
 	type NodeMeta,
+	PURE_ENTER_EVENT,
+	SIGNAL_MATCHED_EVENT,
 	type WorkflowContext,
 	type WorkflowInstanceRow,
 } from "./types.ts";
@@ -50,31 +52,6 @@ function advanceKind(payload: AdvanceJobPayload): AdvanceKind {
 	if (payload.timeout === true) return "timeout";
 	return payload.outcome !== undefined ? "effect" : "start";
 }
-
-/**
- * Synthetic event fired by the driver when entering a pure (decision) state,
- * so the user's guarded transitions can route by inspecting context.
- *
- * Pure nodes typically look like:
- *
- *     foo: {
- *       meta: { kind: "pure" },
- *       on: {
- *         ENTER: [
- *           { target: "go_left",  guard: (ctx) => ctx.x > 5 },
- *           { target: "go_right" },
- *         ],
- *       },
- *     }
- */
-export const PURE_ENTER_EVENT = "ENTER";
-
-/**
- * Event fired at a suspending node when a correlated inbox signal is delivered.
- * A node that does not accept it is not a delivery target at all — the
- * correlator defers the signal instead of poking (see `WorkflowInboxCorrelator`).
- */
-export const SIGNAL_MATCHED_EVENT = "MATCHED";
 
 /**
  * Function the driver uses to enqueue follow-up steve jobs. Supplied by the
@@ -608,4 +585,4 @@ export function effectJobType(handlerName: string): string {
 	return `${JOB_TYPE_EFFECT_PREFIX}${handlerName}`;
 }
 
-export { JOB_TYPE_ADVANCE };
+export { JOB_TYPE_ADVANCE, PURE_ENTER_EVENT, SIGNAL_MATCHED_EVENT };

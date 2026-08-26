@@ -146,6 +146,34 @@ export interface HistoryRow {
 	data: Record<string, unknown>;
 }
 
+/**
+ * Synthetic event fired by the driver when entering a pure (decision) state,
+ * so the user's guarded transitions can route by inspecting context.
+ *
+ * Pure nodes typically look like:
+ *
+ *     foo: {
+ *       meta: { kind: "pure" },
+ *       on: {
+ *         ENTER: [
+ *           { target: "go_left",  guard: (ctx) => ctx.x > 5 },
+ *           { target: "go_right" },
+ *         ],
+ *       },
+ *     }
+ */
+export const PURE_ENTER_EVENT = "ENTER";
+
+/**
+ * Event fired at a suspending node when a correlated inbox signal is delivered.
+ * A node that does not accept it is not a delivery target at all — the
+ * correlator defers the signal instead of poking (see `WorkflowInboxCorrelator`).
+ */
+export const SIGNAL_MATCHED_EVENT = "MATCHED";
+
+/** Event fired at a suspending node by the scheduler once its `wake_at` is due. */
+export const TIMEOUT_EVENT = "TIMEOUT";
+
 /** Steve job type for "advance this instance one step". */
 export const JOB_TYPE_ADVANCE = "workflow.advance";
 
