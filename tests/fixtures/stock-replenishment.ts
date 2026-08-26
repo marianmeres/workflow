@@ -57,6 +57,31 @@ export const stockReplenishmentV1: WorkflowDefinition = {
 };
 
 /**
+ * Same flow with a timer-only `cooldown` node inserted between `send_order` and
+ * `await_reply`. The cooldown has no `MATCHED` edge, so a reply arriving during
+ * it is early: the correlator must defer it rather than deliver it (which would
+ * fail the instance) or drop it.
+ */
+export const stockReplenishmentCooldownV1: WorkflowDefinition = {
+	...stockReplenishmentV1,
+	id: "stock_replenishment_cooldown",
+	fsm: {
+		...stockReplenishmentV1.fsm,
+		states: {
+			...stockReplenishmentV1.fsm.states,
+			send_order: {
+				meta: { kind: "effectful", handler: "sendOrderEmail" },
+				on: { SENT: "cooldown", FAILED: "_end_failed" },
+			},
+			cooldown: {
+				meta: { kind: "suspending", timeoutSec: 3600 },
+				on: { TIMEOUT: "await_reply" },
+			},
+		},
+	},
+};
+
+/**
  * Builds a set of handlers/matchers parameterised by the desired outcomes,
  * so a single test can drive the workflow through different paths.
  */

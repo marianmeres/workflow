@@ -1,12 +1,17 @@
 import type { Cron } from "@marianmeres/cron";
 import type { FSMConfig } from "@marianmeres/fsm";
 import type pg from "pg";
+import { SIGNAL_MATCHED_EVENT } from "./driver.ts";
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
 import { claimUnprocessed, markProcessed } from "./persistence/inbox.ts";
-import { findWaitingByCorrelation } from "./persistence/instances.ts";
+import {
+	findByCorrelation,
+	findTerminalByCorrelation,
+} from "./persistence/instances.ts";
 import { withTransaction } from "./persistence/tx.ts";
 import {
+	type AdvanceJobPayload,
 	EXECUTION_STATE,
 	HISTORY_EVENT,
 	type InboxRow,
@@ -38,18 +43,31 @@ export interface WorkflowInboxCorrelatorOptions {
 const DEFAULT_TICK_EXPRESSION = "* * * * *";
 
 /**
- * Cron-driven correlator that matches `__workflow_inbox` rows to waiting
- * workflow instances. On each tick:
+ * Cron-driven correlator that matches `__workflow_inbox` rows to workflow
+ * instances. On each tick it claims a batch of unprocessed rows
+ * (`FOR UPDATE SKIP LOCKED`) and, per row, finds the live instance owning the
+ * correlation token:
  *
- * 1. Claim a batch of unprocessed inbox rows (`FOR UPDATE SKIP LOCKED`).
- * 2. For each row, find a waiting instance with the same correlation_token.
- * 3. Resolve the instance's current-state `meta.matcher` (if any), call it
- *    against the signal. The matcher is the semantic filter — the token is
- *    just the index lookup.
- * 4. On match: enqueue an advance with `outcome: 'MATCHED'` carrying the
- *    signal payload, mark the inbox row processed, history entry.
- * 5. On no-match (or no waiting instance): mark inbox row processed with
- *    `signal_rejected` history entry against the instance (if there was one).
+ * | Instance                                        | Action                                              |
+ * | ----------------------------------------------- | --------------------------------------------------- |
+ * | none / terminal                                 | mark processed (+ `signal_rejected` if terminal)    |
+ * | live but not `waiting`                          | defer                                               |
+ * | `waiting` at a node that has no `MATCHED` edge  | defer                                               |
+ * | `waiting`, matcher says no                      | `signal_rejected`, mark processed                   |
+ * | `waiting`, matcher says yes                     | poke an advance; the advance does the rest          |
+ *
+ * "Defer" means: leave the row unprocessed and look at it again next tick. A
+ * signal that arrives before its wait point — the instance is still running the
+ * step that emits the token, or sits at a timer-only node — is early, not
+ * wrong; consuming it would lose it, and delivering it to a node with no
+ * `MATCHED` edge would fail the instance.
+ *
+ * The correlator only pokes: it never writes the instance row. The advance
+ * transitions the instance, records `signal_received` and marks the inbox row
+ * processed in one transaction, so a crashed poke is simply re-poked next tick.
+ *
+ * Starvation note: rows are claimed `ORDER BY received_at LIMIT tickBatchSize`,
+ * so a backlog of deferred rows larger than the batch would shadow newer ones.
  *
  * Like {@link WorkflowScheduler}, the correlator does not own its `Cron`. The
  * caller constructs a `Cron`, passes it in, runs its lifecycle. Call
@@ -97,39 +115,104 @@ export class WorkflowInboxCorrelator {
 		await this.cron.unregister(this.tickName);
 	}
 
-	/** Runs one tick immediately. Exposed for testing and on-demand matches. */
+	/**
+	 * Runs one tick immediately. Exposed for testing and on-demand matches.
+	 * Returns the number of rows resolved — poked, rejected or marked processed.
+	 * Deferred rows are not counted; they are still there next tick.
+	 */
 	async tickOnce(): Promise<number> {
 		return await this.#tick();
 	}
 
 	async #tick(): Promise<number> {
-		let processed = 0;
+		const pokes: AdvanceJobPayload[] = [];
 
-		await withTransaction(this.#workflow.db, async (client) => {
+		const resolved = await withTransaction(this.#workflow.db, async (client) => {
 			const rows = await claimUnprocessed(
 				client,
 				this.tenantId,
 				this.#tickBatchSize,
 			);
+			// One poke per instance per tick: a second signal for the same
+			// instance would be fenced out by the first anyway, and deferring it
+			// keeps it for the instance's next wait point.
+			const poked = new Set<string>();
+			let n = 0;
 			for (const row of rows) {
-				await this.#processOne(client, row);
-				processed++;
+				if (await this.#processOne(client, row, poked, pokes)) n++;
 			}
+			return n;
 		});
 
-		if (processed > 0) clog.debug?.(`correlator: processed ${processed} signals`);
-		return processed;
+		// Deliberately after the commit: the advance blocks on the inbox row's
+		// lock, which this tick holds until then, and steve's insert needs a pool
+		// connection of its own — enqueuing under the claim risks starving the
+		// pool. Nothing is lost if the process dies here; the row is still
+		// unprocessed, so the next tick pokes again.
+		for (const payload of pokes) {
+			await this.#workflow.enqueueAdvance(this.#workflow.db, payload);
+		}
+
+		if (resolved > 0) clog.debug?.(`correlator: resolved ${resolved} signals`);
+		return resolved;
 	}
 
-	async #processOne(client: pg.PoolClient, row: InboxRow): Promise<void> {
-		const instance = await findWaitingByCorrelation(
+	/** Leaves the row unprocessed for a later tick. Always returns `false`. */
+	#defer(row: InboxRow, reason: string): boolean {
+		clog.debug?.(`correlator: deferring inbox row ${row.id} (${reason})`);
+		return false;
+	}
+
+	/**
+	 * True if the row was resolved, false if it was deferred. A delivery is
+	 * resolved by appending to `pokes` — the tick enqueues those after it commits.
+	 */
+	async #processOne(
+		client: pg.PoolClient,
+		row: InboxRow,
+		poked: Set<string>,
+		pokes: AdvanceJobPayload[],
+	): Promise<boolean> {
+		const instance = await findByCorrelation(
 			client,
 			this.tenantId,
 			row.correlation_token,
 		);
+
+		// A token no live instance owns is an upstream bug, not something to wait
+		// for. (A completed instance has its token cleared, so it lands here too —
+		// only failed/cancelled ones are still findable.)
 		if (!instance) {
+			clog.warn?.(
+				`correlator: no live instance for token "${row.correlation_token}" (inbox row ${row.id})`,
+			);
+			const terminal = await findTerminalByCorrelation(
+				client,
+				this.tenantId,
+				row.correlation_token,
+			);
+			if (terminal) {
+				await appendHistory(client, {
+					tenant_id: this.tenantId,
+					instance_id: terminal.id,
+					event_type: HISTORY_EVENT.SIGNAL_REJECTED,
+					from_node: terminal.cursor,
+					data: {
+						source: row.source,
+						inbox_id: row.id,
+						reason: `instance is ${terminal.execution_state}`,
+					},
+				});
+			}
 			await markProcessed(client, row.id);
-			return;
+			return true;
+		}
+
+		if (instance.execution_state !== EXECUTION_STATE.WAITING) {
+			return this.#defer(row, `instance ${instance.id} is not waiting yet`);
+		}
+		if (poked.has(instance.id)) {
+			return this.#defer(row, `instance ${instance.id} already poked this tick`);
 		}
 
 		const def = this.#workflow.registry.getDefinition(
@@ -139,27 +222,21 @@ export class WorkflowInboxCorrelator {
 		const stateCfg = def?.fsm.states[instance.cursor as keyof typeof def.fsm.states] as
 			| (FSMConfig<string, string, WorkflowContext>["states"][string])
 			| undefined;
-		const meta = stateCfg?.meta as NodeMeta | undefined;
+
+		// A node with no MATCHED (or wildcard) edge is not a delivery target:
+		// poking it would make the fsm reject the transition and fail the
+		// instance. Typically a timer-only delay node on the way to the real wait.
+		const on = stateCfg?.on ?? {};
+		if (!(SIGNAL_MATCHED_EVENT in on) && !("*" in on)) {
+			return this.#defer(row, `node "${instance.cursor}" does not accept MATCHED`);
+		}
 
 		// Run matcher if any. No matcher = correlation_token alone is the gate.
-		let matched = true;
+		const meta = stateCfg?.meta as NodeMeta | undefined;
 		if (meta && meta.kind === "suspending" && meta.matcher) {
-			const matcherFn = this.#workflow.registry.getMatcher(meta.matcher);
-			if (!matcherFn) {
-				clog.error?.(
-					`correlator: matcher "${meta.matcher}" not registered for instance ${instance.id}`,
-				);
-				await appendHistory(client, {
-					tenant_id: this.tenantId,
-					instance_id: instance.id,
-					event_type: HISTORY_EVENT.SIGNAL_REJECTED,
-					from_node: instance.cursor,
-					data: { reason: `unregistered matcher "${meta.matcher}"` },
-				});
-				await markProcessed(client, row.id);
-				return;
-			}
+			let matched: boolean;
 			try {
+				const matcherFn = this.#workflow.registry.requireMatcher(meta.matcher);
 				matched = await matcherFn({
 					instanceId: instance.id,
 					tenantId: this.tenantId,
@@ -167,50 +244,36 @@ export class WorkflowInboxCorrelator {
 					signal: row,
 				});
 			} catch (e) {
+				// Deferring keeps a transient failure (a lookup, an HTTP call) from
+				// consuming the signal for good. A deterministic throw retries every
+				// tick with an error line — noisy, but not silent.
 				clog.error?.(`correlator: matcher "${meta.matcher}" threw: ${e}`);
-				matched = false;
+				return this.#defer(row, "matcher threw");
+			}
+			if (!matched) {
+				await appendHistory(client, {
+					tenant_id: this.tenantId,
+					instance_id: instance.id,
+					event_type: HISTORY_EVENT.SIGNAL_REJECTED,
+					from_node: instance.cursor,
+					data: { source: row.source, inbox_id: row.id },
+				});
+				await markProcessed(client, row.id);
+				return true;
 			}
 		}
 
-		if (!matched) {
-			await appendHistory(client, {
-				tenant_id: this.tenantId,
-				instance_id: instance.id,
-				event_type: HISTORY_EVENT.SIGNAL_REJECTED,
-				from_node: instance.cursor,
-				data: { source: row.source, inbox_id: row.id },
-			});
-			await markProcessed(client, row.id);
-			return;
-		}
-
-		await appendHistory(client, {
-			tenant_id: this.tenantId,
-			instance_id: instance.id,
-			event_type: HISTORY_EVENT.SIGNAL_RECEIVED,
-			from_node: instance.cursor,
-			data: { source: row.source, inbox_id: row.id },
-		});
-		await markProcessed(client, row.id);
-
-		// Flip to pending so the scheduler / a re-tick won't double-fire. The
-		// advance handler will load and route based on cursor/meta.
-		await client.query(
-			`UPDATE __workflow_instances
-			    SET execution_state = $2, wake_at = NULL, updated_at = now()
-			  WHERE id = $1`,
-			[instance.id, EXECUTION_STATE.PENDING],
-		);
-
-		// The flip above deliberately leaves `seq` alone: the fence must still
-		// match when this advance lands.
-		await this.#workflow.enqueueAdvance(this.#workflow.db, {
+		// Poke only — no write to the instance row. The advance re-reads the inbox
+		// row under a lock, transitions, and marks it processed in one transaction;
+		// the fence makes a duplicate poke a no-op.
+		poked.add(instance.id);
+		pokes.push({
 			tenant_id: this.tenantId,
 			instance_id: instance.id,
 			kind: "signal",
 			expected_seq: instance.seq,
-			outcome: "MATCHED",
-			outcome_data: row.payload,
+			inbox_id: row.id,
 		});
+		return true;
 	}
 }

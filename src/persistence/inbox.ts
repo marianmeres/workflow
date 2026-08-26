@@ -57,6 +57,22 @@ export async function claimUnprocessed(
 	return r.rows;
 }
 
+/**
+ * Loads a single inbox row with a row-level lock — caller MUST be inside a
+ * transaction. Used by the advance to mark delivery in the same transaction as
+ * the transition it triggers.
+ */
+export async function lockInboxRow(
+	client: pg.PoolClient | pg.Client,
+	id: string,
+): Promise<InboxRow | null> {
+	const r = await client.query<InboxRow>(
+		`SELECT ${SELECT_COLUMNS} FROM __workflow_inbox WHERE id = $1 FOR UPDATE`,
+		[id],
+	);
+	return r.rows[0] ?? null;
+}
+
 /** Marks an inbox row as processed (sets `processed_at = now()`). */
 export async function markProcessed(
 	exec: Executor,

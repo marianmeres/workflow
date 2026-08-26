@@ -2,6 +2,7 @@ import { FSM } from "@marianmeres/fsm";
 import type pg from "pg";
 import { clog } from "./log.ts";
 import { appendHistory } from "./persistence/history.ts";
+import { lockInboxRow, markProcessed } from "./persistence/inbox.ts";
 import {
 	lockInstance,
 	updateInstance,
@@ -14,6 +15,7 @@ import {
 	type EffectJobPayload,
 	EXECUTION_STATE,
 	HISTORY_EVENT,
+	type InboxRow,
 	JOB_TYPE_ADVANCE,
 	JOB_TYPE_EFFECT_PREFIX,
 	type NodeMeta,
@@ -71,6 +73,13 @@ function advanceKind(payload: AdvanceJobPayload): AdvanceKind {
 export const PURE_ENTER_EVENT = "ENTER";
 
 /**
+ * Event fired at a suspending node when a correlated inbox signal is delivered.
+ * A node that does not accept it is not a delivery target at all — the
+ * correlator defers the signal instead of poking (see `WorkflowInboxCorrelator`).
+ */
+export const SIGNAL_MATCHED_EVENT = "MATCHED";
+
+/**
  * Function the driver uses to enqueue follow-up steve jobs. Supplied by the
  * `Workflow` class — the driver itself doesn't reach back into steve.Jobs.
  */
@@ -102,6 +111,8 @@ const MAX_PURE_HOPS = 64;
  * 2b. If the payload's fence (`expected_seq`) does not match the locked row, or
  *    the row is not in the state this `kind` of advance expects, no-op — the job
  *    is a duplicate, or a zombie from a step the instance already left.
+ * 2c. `kind: "signal"` → lock the inbox row; it supplies the outcome data and is
+ *    marked processed in this same transaction.
  * 3. If `outcome` was supplied, apply it via fsm.transition(outcome, data).
  *    - Reject → mark failed, append history.
  * 4. Loop on the current state's meta.kind:
@@ -116,7 +127,7 @@ export async function runAdvance(
 	enqueuer: JobEnqueuer,
 	payload: AdvanceJobPayload,
 ): Promise<void> {
-	const { instance_id, outcome, outcome_data } = payload;
+	const { instance_id } = payload;
 	const tenant_id = payloadTenantId(payload);
 	const kind = advanceKind(payload);
 
@@ -154,18 +165,38 @@ export async function runAdvance(
 
 		// Per-kind preconditions. Applied only to payloads that state their kind:
 		// on a legacy payload the kind is a guess, and guessing wrong must not
-		// swallow the job. `timeout` and `signal` get theirs once the ticks stop
-		// pre-flipping the row to `pending` (01-durability #2, 02-correlation #1).
+		// swallow the job. `timeout` gets its own once the scheduler tick stops
+		// pre-flipping the row to `pending` (01-durability #2).
 		if (
 			(payload.kind === "start" &&
 				row.execution_state !== EXECUTION_STATE.PENDING) ||
 			(payload.kind === "effect" &&
-				row.execution_state !== EXECUTION_STATE.RUNNING)
+				row.execution_state !== EXECUTION_STATE.RUNNING) ||
+			(payload.kind === "signal" &&
+				row.execution_state !== EXECUTION_STATE.WAITING)
 		) {
 			clog.debug?.(
 				`advance: ${payload.kind} precondition not met (${row.execution_state}); no-op`,
 			);
 			return;
+		}
+
+		// A signal advance carries the inbox row id, not its payload: the row is
+		// the source of truth, and marking it processed happens in this very
+		// transaction, so delivery and transition commit together or not at all.
+		let outcome = payload.outcome;
+		let outcome_data = payload.outcome_data;
+		let inbox: InboxRow | null = null;
+		if (payload.kind === "signal" && payload.inbox_id) {
+			inbox = await lockInboxRow(client, payload.inbox_id);
+			if (!inbox || inbox.processed_at) {
+				clog.debug?.(
+					`advance: inbox row ${payload.inbox_id} already delivered; no-op`,
+				);
+				return;
+			}
+			outcome = SIGNAL_MATCHED_EVENT;
+			outcome_data = inbox.payload;
 		}
 
 		let def;
@@ -225,6 +256,16 @@ export async function runAdvance(
 					from_node: before,
 					data: { handler: payload.handler, outcome },
 				});
+			}
+			if (inbox) {
+				await appendHistory(client, {
+					tenant_id,
+					instance_id,
+					event_type: HISTORY_EVENT.SIGNAL_RECEIVED,
+					from_node: before,
+					data: { inbox_id: inbox.id, source: inbox.source },
+				});
+				await markProcessed(client, inbox.id);
 			}
 			await appendHistory(client, {
 				tenant_id,

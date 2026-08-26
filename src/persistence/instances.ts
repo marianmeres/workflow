@@ -168,12 +168,23 @@ export async function claimDueWakeUps(
 	return r.rows;
 }
 
+const TERMINAL_STATES = [
+	EXECUTION_STATE.COMPLETED,
+	EXECUTION_STATE.FAILED,
+	EXECUTION_STATE.CANCELLED,
+];
+
 /**
- * Finds the single waiting instance for this tenant + correlation token, if any.
- * Used by the inbox correlator. Does not lock (correlator processes one signal
- * at a time inside its own tx).
+ * Finds the live (non-terminal) instance owning this correlation token, if any.
+ * Used by the inbox correlator — the instance may be in any live execution
+ * state, not just `waiting`: a signal that arrives early is deferred, not
+ * dropped.
+ *
+ * The contract is one live instance per token; `ORDER BY created_at` only makes
+ * a violation deterministic (oldest wins) rather than arbitrary. Does not lock —
+ * the advance re-reads under a lock and is fenced by `seq`.
  */
-export async function findWaitingByCorrelation(
+export async function findByCorrelation(
 	exec: Executor,
 	tenant_id: string,
 	correlation_token: string,
@@ -181,10 +192,36 @@ export async function findWaitingByCorrelation(
 	const r = await exec.query<WorkflowInstanceRow>(
 		`SELECT ${SELECT_COLUMNS} FROM __workflow_instances
 		  WHERE tenant_id = $1
-		    AND execution_state = $2
-		    AND correlation_token = $3
+		    AND correlation_token = $2
+		    AND NOT (execution_state = ANY($3))
+		  ORDER BY created_at
 		  LIMIT 1`,
-		[tenant_id, EXECUTION_STATE.WAITING, correlation_token],
+		[tenant_id, correlation_token, TERMINAL_STATES],
+	);
+	return r.rows[0] ?? null;
+}
+
+/**
+ * Finds the most recent terminal instance owning this correlation token, if any.
+ * Only consulted when {@link findByCorrelation} misses, to tell "the instance is
+ * over" apart from "nobody ever owned this token".
+ *
+ * Note that a *completed* instance has its token cleared, so in practice this
+ * finds the failed/cancelled ones.
+ */
+export async function findTerminalByCorrelation(
+	exec: Executor,
+	tenant_id: string,
+	correlation_token: string,
+): Promise<WorkflowInstanceRow | null> {
+	const r = await exec.query<WorkflowInstanceRow>(
+		`SELECT ${SELECT_COLUMNS} FROM __workflow_instances
+		  WHERE tenant_id = $1
+		    AND correlation_token = $2
+		    AND execution_state = ANY($3)
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		[tenant_id, correlation_token, TERMINAL_STATES],
 	);
 	return r.rows[0] ?? null;
 }

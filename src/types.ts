@@ -174,6 +174,12 @@ export interface AdvanceJobPayload {
 	outcome?: string;
 	/** Optional payload to merge into context via the outcome's `data` field. */
 	outcome_data?: Record<string, unknown>;
+	/**
+	 * Inbox row being delivered. `kind: "signal"` only — the driver reads the
+	 * outcome data off the row and marks it processed in the same transaction as
+	 * the transition, so delivery and transition commit together.
+	 */
+	inbox_id?: string;
 	/** Effect handler that produced the outcome. `kind: "effect"` only; for history. */
 	handler?: string;
 	[key: string]: unknown;
